@@ -2,9 +2,12 @@ package service
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http/httptest"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -100,5 +103,67 @@ func TestOpenModeNeedsNoToken(t *testing.T) {
 	ds, err := c.Devices(context.Background())
 	if err != nil || len(ds) != 1 {
 		t.Fatalf("devices without token: %v %v", ds, err)
+	}
+}
+
+func TestStoredAPKInstall(t *testing.T) {
+	s, srv := testService(t)
+	var mu sync.Mutex
+	installs := 0
+	s.installFn = func(ctx context.Context, device, path string) (string, error) {
+		mu.Lock()
+		installs++
+		mu.Unlock()
+		return "Success", nil
+	}
+	ctx := context.Background()
+	alice := &client.Client{Base: srv.URL, Token: "a", HTTP: srv.Client()}
+	l, err := alice.Acquire(ctx, "", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := alice.InstallStored(ctx, l.ID, "android-f1"); !errors.Is(err, client.ErrAPKNotStored) {
+		t.Fatalf("missing key: %v, want ErrAPKNotStored", err)
+	}
+	if err := alice.PutAPK(ctx, "android-f1", strings.NewReader("apk bytes")); err != nil {
+		t.Fatal(err)
+	}
+	if err := alice.PutAPK(ctx, "android-f1", strings.NewReader("other")); !errors.Is(err, client.ErrAPKExists) {
+		t.Fatalf("second put: %v, want ErrAPKExists", err)
+	}
+	list, err := alice.APKs(ctx)
+	if err != nil || len(list) != 1 || list[0].Key != "android-f1" {
+		t.Fatalf("list: %+v %v", list, err)
+	}
+	for i, want := range []bool{true, false} {
+		got, err := alice.InstallStored(ctx, l.ID, "android-f1")
+		if err != nil || got != want {
+			t.Fatalf("install %d: installed=%v err=%v, want %v", i, got, err, want)
+		}
+	}
+	if installs != 1 {
+		t.Fatalf("adb install ran %d times, want 1", installs)
+	}
+	ds, _ := alice.Devices(ctx)
+	if ds[0].APK != "android-f1" {
+		t.Fatalf("device apk = %q", ds[0].APK)
+	}
+	// An ad hoc install replaces the app, so the device no longer matches the key.
+	if _, err := alice.Install(ctx, l.ID, strings.NewReader("adhoc")); err != nil {
+		t.Fatal(err)
+	}
+	if ds, _ := alice.Devices(ctx); ds[0].APK != "" {
+		t.Fatalf("ad hoc install must clear device apk, got %q", ds[0].APK)
+	}
+	if got, _ := alice.InstallStored(ctx, l.ID, "android-f1"); !got {
+		t.Fatal("stored apk must reinstall after an ad hoc install")
+	}
+	// A wipe removes installed apps.
+	s.set(s.devs["p1"], func(st *DeviceStatus) { st.APK = "android-f1" })
+	s.ctx = ctx
+	s.reset(s.devs["p1"], true)
+	s.halt(s.devs["p1"])
+	if ds, _ := alice.Devices(ctx); ds[0].APK != "" {
+		t.Fatalf("wipe must clear device apk, got %q", ds[0].APK)
 	}
 }

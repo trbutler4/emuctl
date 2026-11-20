@@ -7,10 +7,12 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"path/filepath"
 	"strconv"
 	"sync"
 	"time"
 
+	"github.com/trbutler4/emuctl/pkg/apkstore"
 	"github.com/trbutler4/emuctl/pkg/config"
 	"github.com/trbutler4/emuctl/pkg/emulator"
 	"github.com/trbutler4/emuctl/pkg/lease"
@@ -27,6 +29,7 @@ type DeviceStatus struct {
 	Since    time.Time    `json:"since"`
 	Restarts int          `json:"restarts"`
 	LastErr  string       `json:"last_error,omitempty"`
+	APK      string       `json:"apk,omitempty"` // store key last installed by emuctl; cleared by wipe or ad hoc install
 	Holder   *lease.Lease `json:"holder,omitempty"`
 }
 
@@ -44,12 +47,17 @@ type Service struct {
 	Cfg    *config.Config
 	Log    *slog.Logger
 	Leases *lease.Manager
+	APKs   *apkstore.Store
 	devs   map[string]*device
 	ctx    context.Context
+
+	// installFn replaces adb install in tests.
+	installFn func(ctx context.Context, device, path string) (string, error)
 }
 
 func New(c *config.Config, log *slog.Logger) (*Service, error) {
-	s := &Service{Cfg: c, Log: log, devs: map[string]*device{}}
+	s := &Service{Cfg: c, Log: log, devs: map[string]*device{},
+		APKs: &apkstore.Store{Dir: filepath.Join(c.StateDir, "apks")}}
 	s.Leases = lease.NewManager(c.Names(), c.TTL())
 	s.Leases.Hooks = lease.Hooks{Granted: s.onGrant, Ended: s.onEnd}
 	for _, name := range c.Names() {
@@ -178,7 +186,7 @@ func (s *Service) reset(d *device, wipe bool) {
 	d.wipe = wipe
 	d.mu.Unlock()
 	if wipe {
-		s.set(d, func(st *DeviceStatus) { st.State = "resetting" })
+		s.set(d, func(st *DeviceStatus) { st.State, st.APK = "resetting", "" })
 	}
 	s.start(d)
 }

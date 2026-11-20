@@ -113,6 +113,26 @@ emuctl run -- sh -c 'maestro --device "$EMUCTL_SERIAL" test flows/'
 Maestro only talks to the default adb server (5037), so `run` connects the
 device there with `adb connect`. Don't set `ANDROID_ADB_SERVER_PORT` for Maestro.
 
+## Stored APKs
+
+The server keeps APKs under `state_dir/apks`, by a key you choose, so agents
+switching branches don't re-upload or rebuild the same app. Use a key that
+changes exactly when the native app changes, such as an Expo native
+fingerprint: `android-<fingerprint>`. Entries are immutable, and the server
+remembers which key each device last had, skipping the install when it
+matches. A wipe or an ad hoc `-apk` install clears that.
+
+```sh
+key=android-$(node scripts/dev-client.mjs --hash)
+emuctl run -apk-key "$key" -- maestro test flows/
+# exit 3: not stored. Build once, upload, retry:
+emuctl apk put "$key" app-debug.apk && emuctl run -apk-key "$key" -- maestro test flows/
+```
+
+`run -apk-key` checks the store before queueing, so a miss never holds a
+device. Every builder must sign with the same keystore, or installing over an
+existing app fails with `INSTALL_FAILED_UPDATE_INCOMPATIBLE`.
+
 ## Configuration
 
 `~/.config/emuctl/config.json` (or `-config PATH`, or `EMUCTL_CONFIG`):

@@ -52,6 +52,8 @@ Client (EMUCTL_URL: http://host:7600 or ssh://[user@]host, default http://127.0.
   emuctl run [flags] -- CMD ARGS...    wait for a device, run CMD, release
       -device NAME   specific device (default: any)
       -apk PATH      install before running (repeatable)
+      -apk-key KEY   install a stored APK (skipped if the device has it);
+                     exits 3 if the server does not have KEY
       -reset         wipe the device before running
       -note TEXT     shown in queue/status
     CMD gets ANDROID_SERIAL / EMUCTL_SERIAL / EMUCTL_DEVICE / EMUCTL_LEASE.
@@ -59,6 +61,10 @@ Client (EMUCTL_URL: http://host:7600 or ssh://[user@]host, default http://127.0.
   emuctl acquire [-device NAME] [-note TEXT]   print lease JSON, keep it alive
   emuctl release LEASE
   emuctl install LEASE APK
+  emuctl install LEASE -key KEY        install a stored APK
+  emuctl apk list                      APKs stored on the server
+  emuctl apk has KEY                   exit 0 if stored, 3 if not
+  emuctl apk put KEY FILE              store an APK (exists = success)
   emuctl reset LEASE [-wipe]
   emuctl shell LEASE CMD...            adb shell on the device, run by the server
   emuctl screenshot LEASE FILE.png
@@ -102,6 +108,19 @@ func main() {
 		err = need(args, 1, func() error { return client.FromEnv().Release(ctx, args[0]) })
 	case "install":
 		err = need(args, 2, func() error {
+			if args[1] == "-key" {
+				if len(args) < 3 {
+					return errors.New("usage: emuctl install LEASE -key KEY")
+				}
+				installed, err := client.FromEnv().InstallStored(ctx, args[0], args[2])
+				if errors.Is(err, client.ErrAPKNotStored) {
+					code = exitNotStored
+				}
+				if err == nil && !installed {
+					fmt.Fprintln(os.Stderr, "emuctl: already installed")
+				}
+				return err
+			}
 			f, err := os.Open(args[1])
 			if err != nil {
 				return err
@@ -129,6 +148,8 @@ func main() {
 			fmt.Print(s)
 			return err
 		})
+	case "apk":
+		code, err = apkCmd(ctx, args)
 	case "doctor":
 		err = doctor(args)
 	case "shell":
@@ -342,6 +363,7 @@ func run(ctx context.Context, args []string) (int, error) {
 	reset := fs.Bool("reset", false, "wipe the device first")
 	var apks multi
 	fs.Var(&apks, "apk", "APK to install first (repeatable)")
+	apkKey := fs.String("apk-key", "", "stored APK to install first (skipped if the device has it)")
 	fs.Parse(args)
 	argv := fs.Args()
 	if len(argv) == 0 {
@@ -355,6 +377,14 @@ func run(ctx context.Context, args []string) (int, error) {
 	}
 	c := client.FromEnv()
 	defer c.Close()
+	// Check the store before queueing, so a miss never holds a device.
+	if *apkKey != "" {
+		if ok, err := hasAPK(ctx, c, *apkKey); err != nil {
+			return 1, err
+		} else if !ok {
+			return exitNotStored, fmt.Errorf("apk %s is not stored on the server (build it, then `emuctl apk put %s FILE`)", *apkKey, *apkKey)
+		}
+	}
 	l, err := c.Acquire(ctx, *device, *note, progress)
 	if err != nil {
 		return 1, err
@@ -374,6 +404,20 @@ func run(ctx context.Context, args []string) (int, error) {
 		fmt.Fprintln(os.Stderr, "emuctl: wiping device")
 		if l, err = c.WaitReady(ctx, l.ID); err != nil {
 			return 1, err
+		}
+	}
+	if *apkKey != "" {
+		installed, err := c.InstallStored(ctx, l.ID, *apkKey)
+		if errors.Is(err, client.ErrAPKNotStored) {
+			return exitNotStored, err
+		}
+		if err != nil {
+			return 1, err
+		}
+		if installed {
+			fmt.Fprintf(os.Stderr, "emuctl: installed %s\n", *apkKey)
+		} else {
+			fmt.Fprintf(os.Stderr, "emuctl: %s already installed\n", *apkKey)
 		}
 	}
 	for _, apk := range apks {
@@ -427,6 +471,71 @@ func run(ctx context.Context, args []string) (int, error) {
 		return ee.ExitCode(), nil
 	}
 	return 0, err
+}
+
+// exitNotStored tells scripts the requested APK key is missing on the server,
+// so they can build, `emuctl apk put`, and retry.
+const exitNotStored = 3
+
+func hasAPK(ctx context.Context, c *client.Client, key string) (bool, error) {
+	list, err := c.APKs(ctx)
+	if err != nil {
+		return false, err
+	}
+	for _, a := range list {
+		if a.Key == key {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func apkCmd(ctx context.Context, args []string) (int, error) {
+	c := client.FromEnv()
+	defer c.Close()
+	sub := ""
+	if len(args) > 0 {
+		sub = args[0]
+	}
+	switch {
+	case sub == "list":
+		list, err := c.APKs(ctx)
+		if err != nil {
+			return 1, err
+		}
+		w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+		fmt.Fprintln(w, "KEY\tMB\tLAST USED")
+		for _, a := range list {
+			fmt.Fprintf(w, "%s\t%.1f\t%s\n", a.Key, float64(a.Bytes)/(1<<20), a.LastUsed.Local().Format(time.DateTime))
+		}
+		return 0, w.Flush()
+	case sub == "has" && len(args) == 2:
+		ok, err := hasAPK(ctx, c, args[1])
+		if err != nil {
+			return 1, err
+		}
+		if !ok {
+			return exitNotStored, nil
+		}
+		return 0, nil
+	case sub == "put" && len(args) == 3:
+		f, err := os.Open(args[2])
+		if err != nil {
+			return 1, err
+		}
+		defer f.Close()
+		err = c.PutAPK(ctx, args[1], f)
+		if errors.Is(err, client.ErrAPKExists) {
+			fmt.Fprintf(os.Stderr, "emuctl: %s already stored\n", args[1])
+			return 0, nil
+		}
+		if err != nil {
+			return 1, err
+		}
+		fmt.Fprintf(os.Stderr, "emuctl: stored %s\n", args[1])
+		return 0, nil
+	}
+	return 2, errors.New("usage: emuctl apk list | has KEY | put KEY FILE")
 }
 
 func acquire(ctx context.Context, args []string) error {

@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/trbutler4/emuctl/pkg/apkstore"
 	"github.com/trbutler4/emuctl/pkg/lease"
 )
 
@@ -26,6 +27,9 @@ import (
 //	POST   /v1/leases/{id}/renew             heartbeat, extends TTL
 //	DELETE /v1/leases/{id}                   release (or leave the queue)
 //	POST   /v1/leases/{id}/install           body: APK bytes, adb install -r -g
+//	POST   /v1/leases/{id}/install?apk=KEY   install a stored APK; no-op if the device has it
+//	GET    /v1/apks                          stored APKs
+//	PUT    /v1/apks/{key}                    body: APK bytes; 409 if key exists
 //	POST   /v1/leases/{id}/reset?wipe=1      reboot the leased device, optionally wiping data
 //	POST   /v1/leases/{id}/shell {"command"} adb shell on the leased device
 //	GET    /v1/leases/{id}/screenshot        PNG of the screen
@@ -301,13 +305,28 @@ func (s *Service) Handler() http.Handler {
 		go s.reset(d, r.URL.Query().Get("wipe") == "1")
 		return map[string]string{"restarting": d.emu.Name}, nil
 	}))
+	mux.HandleFunc("GET /v1/apks", s.wrap(func(w http.ResponseWriter, r *http.Request, user string) (any, error) {
+		return s.APKs.List()
+	}))
+	mux.HandleFunc("PUT /v1/apks/{key}", s.wrap(func(w http.ResponseWriter, r *http.Request, user string) (any, error) {
+		return s.putAPK(r, user)
+	}))
 	return mux
 }
 
-const maxAPK = 1 << 30
+const maxAPK = apkstore.MaxSize
 
+// install handles POST /v1/leases/{id}/install. With ?apk=KEY it installs a
+// stored APK, skipping the install when the device already has that key.
+// Otherwise the body is an APK to install once, which is not stored.
 func (s *Service) install(r *http.Request, l lease.Lease) (any, error) {
+	if key := r.URL.Query().Get("apk"); key != "" {
+		return s.installStored(r, l, key)
+	}
 	d := s.devs[l.Device]
+	if err := os.MkdirAll(s.Cfg.DeviceDir(l.Device), 0o700); err != nil {
+		return nil, err
+	}
 	dir, err := os.MkdirTemp(s.Cfg.DeviceDir(l.Device), "upload-")
 	if err != nil {
 		return nil, err
@@ -326,15 +345,74 @@ func (s *Service) install(r *http.Request, l lease.Lease) (any, error) {
 	if n == 0 || n > maxAPK {
 		return nil, fail(http.StatusRequestEntityTooLarge, "APK must be 1 byte to 1 GiB")
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Minute)
+	// The device no longer matches any stored key.
+	s.set(d, func(st *DeviceStatus) { st.APK = "" })
+	out, err := s.adbInstall(r.Context(), l, path)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"installed": true, "bytes": n, "output": out}, nil
+}
+
+func (s *Service) installStored(r *http.Request, l lease.Lease, key string) (any, error) {
+	path, err := s.APKs.Path(key)
+	switch {
+	case errors.Is(err, apkstore.ErrBadKey):
+		return nil, fail(http.StatusBadRequest, "%v", err)
+	case errors.Is(err, apkstore.ErrNotFound):
+		return nil, fail(http.StatusNotFound, "apk %q not in store, upload it with PUT /v1/apks/%s", key, key)
+	case err != nil:
+		return nil, err
+	}
+	d := s.devs[l.Device]
+	d.mu.Lock()
+	have := d.st.APK
+	d.mu.Unlock()
+	s.APKs.Touch(key)
+	if have == key && r.URL.Query().Get("force") != "1" {
+		return map[string]any{"installed": false, "apk": key, "output": "already installed"}, nil
+	}
+	s.set(d, func(st *DeviceStatus) { st.APK = "" })
+	out, err := s.adbInstall(r.Context(), l, path)
+	if err != nil {
+		return nil, err
+	}
+	s.set(d, func(st *DeviceStatus) { st.APK = key })
+	return map[string]any{"installed": true, "apk": key, "output": out}, nil
+}
+
+// adbInstall runs `adb install -r -g` on the leased device. Tests replace it.
+func (s *Service) adbInstall(ctx context.Context, l lease.Lease, path string) (string, error) {
+	if s.installFn != nil {
+		return s.installFn(ctx, l.Device, path)
+	}
+	d := s.devs[l.Device]
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
 	if err := d.emu.Connect(ctx); err != nil {
-		return nil, fail(http.StatusServiceUnavailable, "device not reachable: %v", err)
+		return "", fail(http.StatusServiceUnavailable, "device not reachable: %v", err)
 	}
 	out, err := d.emu.ADB(ctx, "install", "-r", "-g", path)
-	s.Log.Info("install", "lease", l.ID, "user", l.User, "device", l.Device, "bytes", n, "err", err)
+	s.Log.Info("install", "lease", l.ID, "user", l.User, "device", l.Device, "apk", path, "err", err)
 	if err != nil || !strings.Contains(string(out), "Success") {
-		return nil, fail(http.StatusUnprocessableEntity, "adb install failed: %v %s", err, strings.TrimSpace(string(out)))
+		return "", fail(http.StatusUnprocessableEntity, "adb install failed: %v %s", err, strings.TrimSpace(string(out)))
 	}
-	return map[string]any{"installed": true, "bytes": n, "output": strings.TrimSpace(string(out))}, nil
+	return strings.TrimSpace(string(out)), nil
+}
+
+func (s *Service) putAPK(r *http.Request, user string) (any, error) {
+	key := r.PathValue("key")
+	n, err := s.APKs.Put(key, r.Body)
+	switch {
+	case errors.Is(err, apkstore.ErrBadKey):
+		return nil, fail(http.StatusBadRequest, "%v", err)
+	case errors.Is(err, apkstore.ErrExists):
+		return nil, fail(http.StatusConflict, "apk %q already stored, entries are immutable", key)
+	case errors.Is(err, apkstore.ErrTooLarge):
+		return nil, fail(http.StatusRequestEntityTooLarge, "%v", err)
+	case err != nil:
+		return nil, err
+	}
+	s.Log.Info("apk stored", "key", key, "user", user, "bytes", n)
+	return map[string]any{"key": key, "bytes": n}, nil
 }

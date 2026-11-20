@@ -84,6 +84,7 @@ type Device struct {
 	Since    time.Time `json:"since"`
 	Restarts int       `json:"restarts"`
 	LastErr  string    `json:"last_error"`
+	APK      string    `json:"apk"`
 	Holder   *Lease    `json:"holder"`
 }
 
@@ -114,7 +115,7 @@ func (c *Client) Do(ctx context.Context, method, path string, body io.Reader, ou
 		if e.Error == "" {
 			e.Error = strings.TrimSpace(string(b))
 		}
-		return fmt.Errorf("%s %s: %s: %s", method, path, resp.Status, e.Error)
+		return &StatusError{Code: resp.StatusCode, Msg: fmt.Sprintf("%s %s: %s: %s", method, path, resp.Status, e.Error)}
 	}
 	if out == nil {
 		return nil
@@ -159,6 +160,62 @@ func (c *Client) Release(ctx context.Context, id string) error {
 func (c *Client) Install(ctx context.Context, id string, apk io.Reader) (map[string]any, error) {
 	var out map[string]any
 	return out, c.Do(ctx, "POST", "/v1/leases/"+url.PathEscape(id)+"/install", apk, &out)
+}
+
+// StatusError is a non-200 API response.
+type StatusError struct {
+	Code int
+	Msg  string
+}
+
+func (e *StatusError) Error() string { return e.Msg }
+
+func hasStatus(err error, code int) bool {
+	var se *StatusError
+	return errors.As(err, &se) && se.Code == code
+}
+
+// APK is a stored APK on the server.
+type APK struct {
+	Key      string    `json:"key"`
+	Bytes    int64     `json:"bytes"`
+	LastUsed time.Time `json:"last_used"`
+}
+
+var (
+	// ErrAPKNotStored is returned by InstallStored when the server lacks the key.
+	ErrAPKNotStored = errors.New("apk not stored")
+	// ErrAPKExists is returned by PutAPK when the key is already stored.
+	ErrAPKExists = errors.New("apk already stored")
+)
+
+func (c *Client) APKs(ctx context.Context) ([]APK, error) {
+	var out []APK
+	return out, c.Do(ctx, "GET", "/v1/apks", nil, &out)
+}
+
+// PutAPK uploads an APK under key. Entries are immutable, so an existing key
+// returns ErrAPKExists, which callers can usually treat as success.
+func (c *Client) PutAPK(ctx context.Context, key string, apk io.Reader) error {
+	err := c.Do(ctx, "PUT", "/v1/apks/"+url.PathEscape(key), apk, nil)
+	if hasStatus(err, http.StatusConflict) {
+		return fmt.Errorf("%w: %v", ErrAPKExists, err)
+	}
+	return err
+}
+
+// InstallStored installs a stored APK on the leased device. The server skips
+// the install when the device already has key; installed reports whether adb
+// ran.
+func (c *Client) InstallStored(ctx context.Context, id, key string) (installed bool, err error) {
+	var out struct {
+		Installed bool `json:"installed"`
+	}
+	err = c.Do(ctx, "POST", "/v1/leases/"+url.PathEscape(id)+"/install?apk="+url.QueryEscape(key), nil, &out)
+	if hasStatus(err, http.StatusNotFound) {
+		return false, fmt.Errorf("%w: %v", ErrAPKNotStored, err)
+	}
+	return out.Installed, err
 }
 
 func (c *Client) Reset(ctx context.Context, id string, wipe bool) (Lease, error) {
