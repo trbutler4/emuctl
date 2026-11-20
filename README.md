@@ -10,6 +10,25 @@ A pool of Android emulators on one KVM host, shared by people and agents.
 
 Networking is up to you. Bind `api` and `listen` to an address your clients can reach, for example a Tailscale IP.
 
+## Install
+
+Linux (x86_64, aarch64) and macOS (Apple Silicon):
+
+```bash
+nix profile install git+ssh://git@github.com/trbutler4/emuctl
+nix run git+ssh://git@github.com/trbutler4/emuctl -- devices     # without installing
+```
+
+As a flake input: `inputs.emuctl.url = "git+ssh://git@github.com/trbutler4/emuctl";`
+then `inputs.emuctl.packages.${system}.default`, or `overlays.default` for
+`pkgs.emuctl`. Without Nix (including Intel Macs, which nixpkgs no longer
+supports): `go install github.com/trbutler4/emuctl/cmd/emuctl@latest`. It is
+pure Go with no cgo. Clients need `adb` on PATH for `emuctl run`.
+
+The server (`emuctl serve`) runs the Android emulator, so it needs a host with
+hardware virtualization: Linux with `/dev/kvm`, or a Mac with the Android SDK
+emulator. Clients (`run`, `acquire`, `mcp`) run anywhere.
+
 ## Server
 
 ```bash
@@ -95,5 +114,7 @@ Bearer token auth, JSON.
 
 ```bash
 go test -race ./...
-nix build
+nix build                 # runs the tests too
+nix flake check --all-systems
+nix develop               # go, gopls
 ```
