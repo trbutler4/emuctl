@@ -12,9 +12,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -77,6 +79,8 @@ type Device struct {
 	// PIN of the AVD's screen lock, if it has one. emuctl enters it after
 	// boot because apps are hidden until the user's storage is unlocked.
 	UnlockPIN string `json:"unlock_pin,omitempty"`
+	// Show the emulator window instead of running headless.
+	Window bool `json:"window,omitempty"`
 	// Extra emulator flags, appended verbatim.
 	ExtraArgs []string `json:"extra_args,omitempty"`
 }
@@ -96,7 +100,12 @@ type Config struct {
 	MaxLeaseTTL string `json:"max_lease_ttl,omitempty"`
 	// Wipe user data and reboot after every lease, so each user starts clean.
 	ResetOnRelease bool `json:"reset_on_release,omitempty"`
+	// How long a cold boot may take before the emulator is killed and
+	// restarted. Default 6m.
+	BootTimeout string `json:"boot_timeout,omitempty"`
 	// Users and their API tokens. Each value is "sha256:<hex>" of the token.
+	// With no users, the API is open to anyone who can reach it, which is
+	// only allowed when api and listen are loopback addresses.
 	Users   map[string]string `json:"users"`
 	Devices map[string]Device `json:"devices"`
 }
@@ -107,11 +116,108 @@ func DefaultPath() string {
 	if p := os.Getenv("EMUCTL_CONFIG"); p != "" {
 		return p
 	}
-	dir, err := os.UserConfigDir()
-	if err != nil {
-		dir = filepath.Join(os.Getenv("HOME"), ".config")
+	return filepath.Join(ConfigDir(), "config.json")
+}
+
+// ConfigDir is $XDG_CONFIG_HOME/emuctl, else ~/.config/emuctl, on every OS.
+func ConfigDir() string {
+	if d := os.Getenv("XDG_CONFIG_HOME"); d != "" {
+		return filepath.Join(d, "emuctl")
 	}
-	return filepath.Join(dir, "emuctl", "config.json")
+	if h, err := os.UserHomeDir(); err == nil {
+		return filepath.Join(h, ".config", "emuctl")
+	}
+	d, _ := os.UserConfigDir()
+	return filepath.Join(d, "emuctl")
+}
+
+// DefaultSDK finds the Android SDK from the environment or the location
+// Android Studio installs it to.
+func DefaultSDK() string {
+	for _, k := range []string{"ANDROID_SDK_ROOT", "ANDROID_HOME"} {
+		if v := os.Getenv(k); v != "" {
+			return v
+		}
+	}
+	home, _ := os.UserHomeDir()
+	var cands []string
+	switch runtime.GOOS {
+	case "darwin":
+		cands = []string{filepath.Join(home, "Library", "Android", "sdk")}
+	case "windows":
+		cands = []string{filepath.Join(os.Getenv("LOCALAPPDATA"), "Android", "Sdk")}
+	default:
+		cands = []string{filepath.Join(home, "Android", "Sdk"), filepath.Join(home, "Android", "sdk")}
+	}
+	for _, c := range cands {
+		if st, err := os.Stat(filepath.Join(c, "emulator")); err == nil && st.IsDir() {
+			return c
+		}
+	}
+	return ""
+}
+
+// DefaultImage picks the newest installed system image for the host CPU,
+// preferring google_apis over Play Store images, else android-36 google_apis.
+func DefaultImage(sdk string) string {
+	abi := "x86_64"
+	if runtime.GOARCH == "arm64" {
+		abi = "arm64-v8a"
+	}
+	if imgs := InstalledImages(sdk, abi); len(imgs) > 0 {
+		return imgs[0]
+	}
+	return "system-images;android-36;google_apis;" + abi
+}
+
+// InstalledImages lists SDK system images for abi, best first.
+func InstalledImages(sdk, abi string) []string {
+	if sdk == "" {
+		return nil
+	}
+	m, _ := filepath.Glob(filepath.Join(sdk, "system-images", "*", "*", abi))
+	score := func(p string) (float64, int) {
+		api, tag := filepath.Base(filepath.Dir(filepath.Dir(p))), filepath.Base(filepath.Dir(p))
+		var n float64
+		fmt.Sscanf(strings.TrimPrefix(api, "android-"), "%g", &n)
+		rank := map[string]int{"google_apis": 3, "default": 2, "google_apis_playstore": 1}[tag]
+		return n, rank
+	}
+	sort.Slice(m, func(i, j int) bool {
+		ai, ri := score(m[i])
+		aj, rj := score(m[j])
+		if ri != rj {
+			return ri > rj
+		}
+		return ai > aj
+	})
+	out := make([]string, 0, len(m))
+	for _, p := range m {
+		rel, _ := filepath.Rel(sdk, p)
+		out = append(out, strings.ReplaceAll(filepath.ToSlash(rel), "/", ";"))
+	}
+	return out
+}
+
+// Open reports whether the API runs without authentication.
+func (c *Config) Open() bool { return len(c.Users) == 0 }
+
+// BootTimeoutDuration is the parsed boot timeout.
+func (c *Config) BootTimeoutDuration() time.Duration {
+	d, _ := time.ParseDuration(c.BootTimeout)
+	return d
+}
+
+func isLoopback(hostport string) bool {
+	host := hostport
+	if h, _, err := net.SplitHostPort(hostport); err == nil {
+		host = h
+	}
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func Load(path string) (*Config, error) {
@@ -136,10 +242,10 @@ func Parse(b []byte) (*Config, error) {
 
 func (c *Config) applyDefaults() {
 	if c.SDK == "" {
-		c.SDK = os.Getenv("ANDROID_SDK_ROOT")
+		c.SDK = DefaultSDK()
 	}
-	if c.SDK == "" {
-		c.SDK = os.Getenv("ANDROID_HOME")
+	if c.BootTimeout == "" {
+		c.BootTimeout = "6m"
 	}
 	if c.StateDir == "" {
 		base := os.Getenv("XDG_DATA_HOME")
@@ -169,7 +275,7 @@ func (c *Config) applyDefaults() {
 			d.Profile = "pixel_7"
 		}
 		if d.Image == "" {
-			d.Image = "system-images;android-36;google_apis;x86_64"
+			d.Image = DefaultImage(c.SDK)
 		}
 		if d.ConsolePort == 0 {
 			d.ConsolePort = DefaultConsoleBase + 2*i
@@ -221,12 +327,18 @@ func (c *Config) Validate() error {
 	if _, err := time.ParseDuration(c.MaxLeaseTTL); err != nil {
 		return fmt.Errorf("max_lease_ttl: %w", err)
 	}
+	if d, err := time.ParseDuration(c.BootTimeout); err != nil || d <= 0 {
+		return fmt.Errorf("boot_timeout: must be a positive duration like \"6m\"")
+	}
+	if c.Open() && (!isLoopback(c.API) || !isLoopback(c.Listen)) {
+		return errors.New("no users configured: api and listen must be loopback (127.0.0.1) unless you add users with `emuctl add-user NAME`")
+	}
 	for user, h := range c.Users {
 		if !nameRE.MatchString(user) {
 			return fmt.Errorf("user %q: name must match %s", user, nameRE)
 		}
 		if hx, ok := strings.CutPrefix(h, "sha256:"); !ok || len(hx) != 64 {
-			return fmt.Errorf("user %s: token must be \"sha256:<64 hex>\" (see `emuctl hash-token`)", user)
+			return fmt.Errorf("user %s: token must be \"sha256:<64 hex>\" (see `emuctl new-token`)", user)
 		}
 	}
 	for _, name := range c.Names() {
@@ -274,15 +386,14 @@ func (c *Config) Serial(name string) string {
 	return fmt.Sprintf("emulator-%d", c.Devices[name].ConsolePort)
 }
 
-// Example is written by `emuctl init`.
+// Example is written by `emuctl init`. It runs one local device with no
+// authentication. See the README to share devices over a network.
 const Example = `{
-  "listen": "0.0.0.0",
-  "api": "0.0.0.0:7600",
-  "reset_on_release": true,
+  "api": "127.0.0.1:7600",
+  "listen": "127.0.0.1",
   "users": {},
   "devices": {
-    "pixel-1": { "profile": "pixel_7", "expose_port": 15601 },
-    "pixel-2": { "profile": "pixel_7", "expose_port": 15603 }
+    "pixel-1": { "profile": "pixel_7", "expose_port": 15601 }
   }
 }
 `

@@ -14,6 +14,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/trbutler4/emuctl/pkg/config"
 )
 
 type Client struct {
@@ -33,15 +35,7 @@ func FromEnv() *Client {
 	if token == "" {
 		file := os.Getenv("EMUCTL_TOKEN_FILE")
 		if file == "" {
-			// Use XDG-style ~/.config on every OS (os.UserConfigDir is
-			// ~/Library/Application Support on macOS).
-			if dir := os.Getenv("XDG_CONFIG_HOME"); dir != "" {
-				file = filepath.Join(dir, "emuctl", "token")
-			} else if home, err := os.UserHomeDir(); err == nil {
-				file = filepath.Join(home, ".config", "emuctl", "token")
-			} else if dir, err := os.UserConfigDir(); err == nil {
-				file = filepath.Join(dir, "emuctl", "token")
-			}
+			file = filepath.Join(config.ConfigDir(), "token")
 		}
 		if b, err := os.ReadFile(file); err == nil {
 			token = strings.TrimSpace(string(b))
@@ -89,7 +83,7 @@ func (c *Client) Do(ctx context.Context, method, path string, body io.Reader, ou
 		return err
 	}
 	defer resp.Body.Close()
-	b, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	b, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
 	if resp.StatusCode != 200 {
 		var e struct{ Error string }
 		json.Unmarshal(b, &e)
@@ -99,6 +93,10 @@ func (c *Client) Do(ctx context.Context, method, path string, body io.Reader, ou
 		return fmt.Errorf("%s %s: %s: %s", method, path, resp.Status, e.Error)
 	}
 	if out == nil {
+		return nil
+	}
+	if p, ok := out.(*[]byte); ok {
+		*p = b
 		return nil
 	}
 	return json.Unmarshal(b, out)
@@ -146,6 +144,25 @@ func (c *Client) Reset(ctx context.Context, id string, wipe bool) (Lease, error)
 	}
 	var l Lease
 	return l, c.Do(ctx, "POST", "/v1/leases/"+url.PathEscape(id)+"/reset"+q, nil, &l)
+}
+
+// ShellResult is the output of a command run on a leased device.
+type ShellResult struct {
+	Output   string `json:"output"`
+	ExitCode int    `json:"exit_code"`
+}
+
+// Shell runs `adb shell CMD` on the leased device, on the server.
+func (c *Client) Shell(ctx context.Context, id, cmd string) (ShellResult, error) {
+	b, _ := json.Marshal(map[string]string{"command": cmd})
+	var out ShellResult
+	return out, c.Do(ctx, "POST", "/v1/leases/"+url.PathEscape(id)+"/shell", bytes.NewReader(b), &out)
+}
+
+// Screenshot returns a PNG of the leased device's screen.
+func (c *Client) Screenshot(ctx context.Context, id string) ([]byte, error) {
+	var png []byte
+	return png, c.Do(ctx, "GET", "/v1/leases/"+url.PathEscape(id)+"/screenshot", nil, &png)
 }
 
 func (c *Client) Logs(ctx context.Context, device string) (string, error) {

@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"text/tabwriter"
@@ -27,15 +28,24 @@ import (
 	"github.com/trbutler4/emuctl/pkg/service"
 )
 
-const usage = `emuctl: shared Android emulator pool
+// version is set at build time with -ldflags "-X main.version=...".
+var version = "dev"
+
+const usage = `emuctl: Android emulators for people and agents, with a lease queue and an MCP server
+
+Quick start (one machine):
+  emuctl init && emuctl doctor         write ~/.config/emuctl/config.json and check the SDK
+  emuctl serve                         boot the emulators and serve the API on 127.0.0.1:7600
+  emuctl mcp                           MCP server for agents (add it to your agent's config)
 
 Server (on the emulator host):
   emuctl serve [-config PATH]          run emulators, lease queue and API
-  emuctl init [-config PATH]           write an example config
+  emuctl init [-config PATH]           write a starter config (one local device)
+  emuctl doctor [-config PATH]         check the SDK, system images and config
   emuctl add-user NAME [-config PATH]  create a user, print its token once
   emuctl new-token                     print a token (stdout) and its config hash (stderr)
 
-Client (EMUCTL_URL, EMUCTL_TOKEN):
+Client (EMUCTL_URL, default http://127.0.0.1:7600; EMUCTL_TOKEN or ~/.config/emuctl/token):
   emuctl devices                       device states and holders
   emuctl queue                         waiting leases
   emuctl run [flags] -- CMD ARGS...    wait for a device, run CMD, release
@@ -49,8 +59,11 @@ Client (EMUCTL_URL, EMUCTL_TOKEN):
   emuctl release LEASE
   emuctl install LEASE APK
   emuctl reset LEASE [-wipe]
+  emuctl shell LEASE CMD...            adb shell on the device, run by the server
+  emuctl screenshot LEASE FILE.png
   emuctl logs DEVICE
   emuctl mcp                           MCP server on stdio for agents
+  emuctl version
 `
 
 func main() {
@@ -115,8 +128,30 @@ func main() {
 			fmt.Print(s)
 			return err
 		})
+	case "doctor":
+		err = doctor(args)
+	case "shell":
+		err = need(args, 2, func() error {
+			res, err := client.FromEnv().Shell(ctx, args[0], strings.Join(args[1:], " "))
+			if err != nil {
+				return err
+			}
+			fmt.Print(res.Output)
+			code = res.ExitCode
+			return nil
+		})
+	case "screenshot":
+		err = need(args, 2, func() error {
+			png, err := client.FromEnv().Screenshot(ctx, args[0])
+			if err != nil {
+				return err
+			}
+			return os.WriteFile(args[1], png, 0o644)
+		})
+	case "version", "-version", "--version":
+		fmt.Println("emuctl", version)
 	case "mcp":
-		err = mcp.New(client.FromEnv()).Serve(ctx, os.Stdin, os.Stdout)
+		err = mcp.New(client.FromEnv(), version).Serve(ctx, os.Stdin, os.Stdout)
 	case "help", "-h", "--help":
 		fmt.Print(usage)
 	default:
@@ -151,8 +186,8 @@ func serve(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	if len(c.Users) == 0 {
-		return errors.New("no users configured (run `emuctl add-user NAME`)")
+	if c.Open() {
+		fmt.Fprintln(os.Stderr, "emuctl: no users configured, API is unauthenticated on", c.API)
 	}
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	s, err := service.New(c, log)
@@ -402,4 +437,61 @@ func acquire(ctx context.Context, args []string) error {
 	err = c.Heartbeat(ctx, l.ID, 20*time.Second)
 	c.Release(context.Background(), l.ID)
 	return err
+}
+
+// doctor checks that `emuctl serve` can start every configured device.
+func doctor(args []string) error {
+	fs := flag.NewFlagSet("doctor", flag.ExitOnError)
+	path := configFlag(fs)
+	fs.Parse(args)
+	bad := 0
+	check := func(ok bool, what, fix string) {
+		if ok {
+			fmt.Println("ok  ", what)
+			return
+		}
+		bad++
+		fmt.Println("FAIL", what)
+		if fix != "" {
+			fmt.Println("     ", fix)
+		}
+	}
+	c, err := config.Load(*path)
+	check(err == nil, "config "+*path, fmt.Sprint(err))
+	if err != nil {
+		return errors.New("config problem")
+	}
+	exists := func(p string) bool { _, err := os.Stat(p); return err == nil }
+	check(c.SDK != "", "Android SDK found", "install Android Studio or the command-line tools, then set \"sdk\" in the config or ANDROID_SDK_ROOT")
+	if c.SDK != "" {
+		check(exists(filepath.Join(c.SDK, "emulator", "emulator")), "emulator in "+c.SDK, "sdkmanager emulator")
+		check(exists(filepath.Join(c.SDK, "platform-tools", "adb")), "adb in "+c.SDK, "sdkmanager platform-tools")
+		for _, name := range c.Names() {
+			d := c.Devices[name]
+			avd := filepath.Join(c.AVDHome(name), c.AVDName(name)+".avd", "config.ini")
+			if exists(avd) {
+				check(true, name+": AVD "+filepath.Dir(avd), "")
+				continue
+			}
+			img := filepath.Join(append([]string{c.SDK}, strings.Split(d.Image, ";")...)...)
+			check(exists(img), name+": system image "+d.Image+" (AVD created on first serve)",
+				fmt.Sprintf("install it with sdkmanager %q or Android Studio > Settings > SDK Platforms, or set \"image\" to one you have", d.Image))
+		}
+	}
+	if kvm := "/dev/kvm"; runtime.GOOS == "linux" {
+		f, err := os.OpenFile(kvm, os.O_RDWR, 0)
+		if err == nil {
+			f.Close()
+		}
+		check(err == nil, "hardware acceleration ("+kvm+")", "enable virtualization and add yourself to the kvm group")
+	}
+	if c.Open() {
+		fmt.Println("note  no users: API is unauthenticated, loopback only (" + c.API + ")")
+	} else {
+		fmt.Printf("note  %d user(s), API on %s, adb forwarders on %s\n", len(c.Users), c.API, c.Listen)
+	}
+	if bad > 0 {
+		return fmt.Errorf("%d problem(s)", bad)
+	}
+	return nil
 }

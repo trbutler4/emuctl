@@ -7,6 +7,7 @@ package mcp
 import (
 	"bufio"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -17,20 +18,24 @@ import (
 	"github.com/trbutler4/emuctl/pkg/client"
 )
 
-const Instructions = `emuctl: shared Android emulators. Devices are exclusive and queued FIFO across all users and agents.
+const Instructions = `emuctl: managed Android emulators. Devices are exclusive and queued FIFO across all users and agents.
 
 Workflow:
 1. emulator_acquire (optionally device=NAME). Blocks while queued up to wait_seconds; if it returns state "queued", call it again with the same lease_id to keep your place. Never request a second lease while one is queued.
-2. When active and ready, run tools against the returned "adb" target:
-     adb connect <adb>           (once, then the device appears in "adb devices")
-     adb -s <adb> shell ...
-     maestro --device <adb> test flow.yaml
+2. When active and ready, use the device:
+     emulator_shell runs "adb shell" commands (am start, pm list packages, input tap X Y, input text, uiautomator dump /dev/tty, getprop).
+     emulator_screenshot returns the current screen as an image.
+     emulator_install installs an APK from this machine.
+   With adb or Maestro installed locally you can also drive the returned "adb" target directly:
+     adb connect <adb>, then adb -s <adb> ..., or maestro --device <adb> test flow.yaml
    Only the machine that acquired the lease can connect. Other clients are refused.
-3. Install builds with emulator_install (path to an APK on this machine) or "adb -s <adb> install -r -g app.apk".
-4. emulator_reset wipes app data and reboots (wipe=true) or just reboots. Wait for emulator_status to show ready before continuing.
-5. Call emulator_release as soon as you are done. Others are waiting. The lease is kept alive automatically while this MCP server runs and is released if it exits.
+3. emulator_reset wipes app data and reboots (wipe=true) or just reboots, and returns when the device is ready.
+4. Call emulator_release as soon as you are done. Others may be waiting. The lease is kept alive automatically while this MCP server runs and is released if it exits.
 
-Do not run adb kill-server or connect to devices you do not hold. Logs: emulator_logs.`
+Do not run adb kill-server or connect to devices you do not hold. Boot problems: emulator_logs.`
+
+// image is a tool result sent as MCP image content.
+type image struct{ png []byte }
 
 type rpcReq struct {
 	JSONRPC string          `json:"jsonrpc"`
@@ -59,12 +64,13 @@ type tool struct {
 }
 
 type Server struct {
-	C      *client.Client
-	mu     sync.Mutex
-	leases map[string]context.CancelFunc // heartbeats for leases we hold
-	tools  []tool
-	out    *json.Encoder
-	outMu  sync.Mutex
+	C       *client.Client
+	version string
+	mu      sync.Mutex
+	leases  map[string]context.CancelFunc // heartbeats for leases we hold
+	tools   []tool
+	out     *json.Encoder
+	outMu   sync.Mutex
 }
 
 func obj(props map[string]any, required ...string) map[string]any {
@@ -84,8 +90,8 @@ func num(d string) map[string]any     { return map[string]any{"type": "integer",
 
 func sarg(a map[string]any, k string) string { s, _ := a[k].(string); return s }
 
-func New(c *client.Client) *Server {
-	s := &Server{C: c, leases: map[string]context.CancelFunc{}}
+func New(c *client.Client, version string) *Server {
+	s := &Server{C: c, version: version, leases: map[string]context.CancelFunc{}}
 	s.tools = []tool{
 		{"emulator_usage", "How to use the shared emulators. Read this first.", obj(nil),
 			func(ctx context.Context, a map[string]any) (any, error) { return Instructions, nil }},
@@ -111,6 +117,25 @@ func New(c *client.Client) *Server {
 				}
 				defer f.Close()
 				return s.C.Install(ctx, sarg(a, "lease_id"), f)
+			}},
+		{"emulator_shell", "Run a command on your leased device with adb shell (on the emulator host, so no local adb is needed). Returns output and exit code.",
+			obj(map[string]any{"lease_id": str("lease id"), "command": str("shell command, e.g. 'input tap 540 1200' or 'am start -n pkg/.Main'")}, "lease_id", "command"),
+			func(ctx context.Context, a map[string]any) (any, error) {
+				return s.C.Shell(ctx, sarg(a, "lease_id"), sarg(a, "command"))
+			}},
+		{"emulator_screenshot", "Screenshot of your leased device, returned as a PNG image. Pass save_path to also write it to a file on this machine.",
+			obj(map[string]any{"lease_id": str("lease id"), "save_path": str("optional local file path for the PNG")}, "lease_id"),
+			func(ctx context.Context, a map[string]any) (any, error) {
+				png, err := s.C.Screenshot(ctx, sarg(a, "lease_id"))
+				if err != nil {
+					return nil, err
+				}
+				if p := sarg(a, "save_path"); p != "" {
+					if err := os.WriteFile(p, png, 0o644); err != nil {
+						return nil, err
+					}
+				}
+				return image{png}, nil
 			}},
 		{"emulator_reset", "Reboot your leased device, wiping all data when wipe=true. Blocks until ready.",
 			obj(map[string]any{"lease_id": str("lease id"), "wipe": boolean("wipe user data")}, "lease_id"),
@@ -277,7 +302,7 @@ func (s *Server) handle(ctx context.Context, req rpcReq) {
 		s.send(rpcResp{ID: req.ID, Result: map[string]any{
 			"protocolVersion": p.ProtocolVersion,
 			"capabilities":    map[string]any{"tools": map[string]any{}},
-			"serverInfo":      map[string]any{"name": "emuctl", "version": "0.1.0"},
+			"serverInfo":      map[string]any{"name": "emuctl", "version": s.version},
 			"instructions":    Instructions,
 		}})
 	case "ping":
@@ -295,6 +320,11 @@ func (s *Server) handle(ctx context.Context, req rpcReq) {
 				continue
 			}
 			v, err := t.run(ctx, p.Arguments)
+			if img, ok := v.(image); ok && err == nil {
+				s.send(rpcResp{ID: req.ID, Result: map[string]any{"content": []map[string]any{{
+					"type": "image", "mimeType": "image/png", "data": base64.StdEncoding.EncodeToString(img.png)}}}})
+				return
+			}
 			text, isErr := "", false
 			if err != nil {
 				text, isErr = err.Error(), true

@@ -47,3 +47,21 @@ func TestExampleParses(t *testing.T) {
 		t.Fatal("example should show expose_port")
 	}
 }
+
+func TestOpenModeLoopbackOnly(t *testing.T) {
+	if c, err := Parse([]byte(`{"devices":{"a":{}}}`)); err != nil || !c.Open() {
+		t.Fatalf("default loopback open mode: %v", err)
+	}
+	for _, bad := range []string{
+		`{"api":"0.0.0.0:7600","devices":{}}`,
+		`{"listen":"100.64.0.1","devices":{}}`,
+	} {
+		if _, err := Parse([]byte(bad)); err == nil {
+			t.Errorf("open mode on non-loopback accepted: %s", bad)
+		}
+	}
+	ok := `{"api":"0.0.0.0:7600","listen":"0.0.0.0","users":{"a":"` + HashToken("x") + `"},"devices":{}}`
+	if _, err := Parse([]byte(ok)); err != nil {
+		t.Fatal(err)
+	}
+}

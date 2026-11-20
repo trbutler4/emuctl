@@ -239,7 +239,7 @@ func (s *Service) runOnce(ctx context.Context, d *device, log *slog.Logger) erro
 	})
 	exited := make(chan error, 1)
 	go func() { exited <- cmd.Wait() }()
-	bootCtx, cancel := context.WithTimeout(ctx, 6*time.Minute)
+	bootCtx, cancel := context.WithTimeout(ctx, s.Cfg.BootTimeoutDuration())
 	defer cancel()
 	booted := make(chan error, 1)
 	go func() { booted <- d.emu.WaitBooted(bootCtx) }()

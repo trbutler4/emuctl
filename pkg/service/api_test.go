@@ -84,3 +84,21 @@ func TestQueueAcrossUsers(t *testing.T) {
 		t.Fatalf("holder should be bob: %+v", ds[0])
 	}
 }
+
+func TestOpenModeNeedsNoToken(t *testing.T) {
+	cfg, err := config.Parse([]byte(`{"sdk":"/nonexistent","state_dir":"` + t.TempDir() + `","devices":{"p1":{}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := New(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(s.Handler())
+	defer srv.Close()
+	c := &client.Client{Base: srv.URL, HTTP: srv.Client()}
+	ds, err := c.Devices(context.Background())
+	if err != nil || len(ds) != 1 {
+		t.Fatalf("devices without token: %v %v", ds, err)
+	}
+}

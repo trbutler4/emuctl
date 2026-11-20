@@ -1,5 +1,5 @@
 {
-  description = "emuctl: shared Android emulator pool with a lease queue";
+  description = "emuctl: Android emulators for people and AI agents, with a lease queue and an MCP server";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
@@ -9,7 +9,7 @@
       # `go build ./cmd/emuctl` (no cgo, no other dependencies).
       systems = [ "x86_64-linux" "aarch64-linux" "aarch64-darwin" ];
       forAll = f: nixpkgs.lib.genAttrs systems (system: f nixpkgs.legacyPackages.${system});
-      version = "0.1.0";
+      version = "0.2.0";
     in {
       packages = forAll (pkgs: rec {
         emuctl = pkgs.buildGoModule {
@@ -19,9 +19,9 @@
           vendorHash = null; # standard library only
           subPackages = [ "cmd/emuctl" ];
           env.CGO_ENABLED = "0";
-          ldflags = [ "-s" "-w" ];
+          ldflags = [ "-s" "-w" "-X main.version=${version}" ];
           meta = {
-            description = "Shared Android emulator pool: FIFO leases, holder-only adb, MCP server";
+            description = "Android emulators for people and AI agents: lease queue, MCP server, holder-only adb";
             homepage = "https://github.com/trbutler4/emuctl";
             mainProgram = "emuctl";
             platforms = nixpkgs.lib.platforms.linux ++ nixpkgs.lib.platforms.darwin;

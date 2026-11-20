@@ -27,6 +27,8 @@ import (
 //	DELETE /v1/leases/{id}                   release (or leave the queue)
 //	POST   /v1/leases/{id}/install           body: APK bytes, adb install -r -g
 //	POST   /v1/leases/{id}/reset?wipe=1      reboot the leased device, optionally wiping data
+//	POST   /v1/leases/{id}/shell {"command"} adb shell on the leased device
+//	GET    /v1/leases/{id}/screenshot        PNG of the screen
 //	GET    /v1/devices/{name}/logs           tail of the emulator log
 //	POST   /v1/devices/{name}/restart        admin: force restart (ends lease)
 func (s *Service) serveAPI(ctx context.Context) error {
@@ -55,6 +57,10 @@ func (s *Service) wrap(h handler) http.HandlerFunc {
 		w.Header().Set("Content-Type", "application/json")
 		token, _ := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
 		user, ok := s.Cfg.Authenticate(token)
+		if !ok && s.Cfg.Open() {
+			// No users: loopback-only, enforced by config validation.
+			user, ok = "local", true
+		}
 		if !ok {
 			w.WriteHeader(http.StatusUnauthorized)
 			json.NewEncoder(w).Encode(map[string]string{"error": "missing or invalid token"})
@@ -73,8 +79,19 @@ func (s *Service) wrap(h handler) http.HandlerFunc {
 			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 			return
 		}
+		if b, ok := v.(raw); ok {
+			w.Header().Set("Content-Type", b.contentType)
+			w.Write(b.body)
+			return
+		}
 		json.NewEncoder(w).Encode(v)
 	}
+}
+
+// raw is a non-JSON response body.
+type raw struct {
+	contentType string
+	body        []byte
 }
 
 func clientIP(r *http.Request) string {
@@ -211,6 +228,49 @@ func (s *Service) Handler() http.Handler {
 		go s.reset(d, wipe)
 		s.Log.Info("reset requested", "lease", l.ID, "user", user, "device", l.Device, "wipe", wipe)
 		return s.view(r, l), nil
+	}))
+	mux.HandleFunc("POST /v1/leases/{id}/shell", s.wrap(func(w http.ResponseWriter, r *http.Request, user string) (any, error) {
+		l, err := s.owned(r, user, true)
+		if err != nil {
+			return nil, err
+		}
+		var req struct {
+			Command string `json:"command"`
+		}
+		if err := json.NewDecoder(io.LimitReader(r.Body, 64<<10)).Decode(&req); err != nil || strings.TrimSpace(req.Command) == "" {
+			return nil, fail(http.StatusBadRequest, "body must be {\"command\": \"...\"}")
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
+		defer cancel()
+		d := s.devs[l.Device]
+		if err := d.emu.Connect(ctx); err != nil {
+			return nil, fail(http.StatusServiceUnavailable, "device not reachable: %v", err)
+		}
+		out, code, err := d.emu.Shell(ctx, req.Command)
+		if err != nil {
+			return nil, fail(http.StatusBadGateway, "adb shell: %v", err)
+		}
+		if len(out) > 1<<20 {
+			out = append(out[:1<<20], []byte("\n[truncated]")...)
+		}
+		return map[string]any{"output": string(out), "exit_code": code}, nil
+	}))
+	mux.HandleFunc("GET /v1/leases/{id}/screenshot", s.wrap(func(w http.ResponseWriter, r *http.Request, user string) (any, error) {
+		l, err := s.owned(r, user, true)
+		if err != nil {
+			return nil, err
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), time.Minute)
+		defer cancel()
+		d := s.devs[l.Device]
+		if err := d.emu.Connect(ctx); err != nil {
+			return nil, fail(http.StatusServiceUnavailable, "device not reachable: %v", err)
+		}
+		png, err := d.emu.Screenshot(ctx)
+		if err != nil {
+			return nil, fail(http.StatusBadGateway, "screencap: %v", err)
+		}
+		return raw{"image/png", png}, nil
 	}))
 	mux.HandleFunc("GET /v1/devices/{name}/logs", s.wrap(func(w http.ResponseWriter, r *http.Request, user string) (any, error) {
 		name := r.PathValue("name")

@@ -4,6 +4,7 @@ package emulator
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -67,9 +68,20 @@ func (e *Emulator) Create(ctx context.Context) error {
 		return err
 	}
 	if !e.Exists() {
-		avdmanager := filepath.Join(e.Cfg.SDK, "cmdline-tools", "latest", "bin", "avdmanager")
+		if _, err := os.Stat(filepath.Join(e.Cfg.SDK, filepath.Join(strings.Split(e.Dev.Image, ";")...))); err != nil {
+			return fmt.Errorf("%s: system image %q is not installed: run sdkmanager %q (see `emuctl doctor`)", e.Name, e.Dev.Image, e.Dev.Image)
+		}
+		avdmanager := ""
 		if m, _ := filepath.Glob(filepath.Join(e.Cfg.SDK, "cmdline-tools", "*", "bin", "avdmanager")); len(m) > 0 {
 			avdmanager = m[0]
+		}
+		if avdmanager == "" {
+			// Android Studio installs without cmdline-tools. An AVD is just
+			// two ini files, so write them directly.
+			if err := e.writeAVD(); err != nil {
+				return err
+			}
+			return e.applyHardware()
 		}
 		cmd := exec.CommandContext(ctx, avdmanager, "create", "avd", "--name", e.avdName(),
 			"--package", e.Dev.Image, "--device", e.Dev.Profile, "--path", e.avdDir())
@@ -80,6 +92,41 @@ func (e *Emulator) Create(ctx context.Context) error {
 		}
 	}
 	return e.applyHardware()
+}
+
+// writeAVD creates a minimal AVD for e.Dev.Image without avdmanager.
+func (e *Emulator) writeAVD() error {
+	parts := strings.Split(e.Dev.Image, ";") // system-images;android-36;google_apis;arm64-v8a
+	if len(parts) != 4 || parts[0] != "system-images" {
+		return fmt.Errorf("%s: image %q must look like system-images;android-NN;TAG;ABI", e.Name, e.Dev.Image)
+	}
+	target, tag, abi := parts[1], parts[2], parts[3]
+	arch := map[string]string{"arm64-v8a": "arm64", "x86_64": "x86_64", "x86": "x86"}[abi]
+	if arch == "" {
+		arch = abi
+	}
+	if err := os.MkdirAll(e.avdDir(), 0o700); err != nil {
+		return err
+	}
+	cfg := strings.Join([]string{
+		"AvdId=" + e.avdName(),
+		"avd.ini.displayname=emuctl " + e.Name,
+		"avd.ini.encoding=UTF-8",
+		"abi.type=" + abi,
+		"hw.cpu.arch=" + arch,
+		"hw.device.name=" + e.Dev.Profile,
+		"image.sysdir.1=" + strings.Join(parts, "/") + "/",
+		"tag.id=" + strings.SplitN(tag, "_ps16k", 2)[0],
+		"target=" + target,
+		"PlayStore.enabled=" + strconv.FormatBool(strings.Contains(tag, "playstore")),
+		"disk.dataPartition.size=6G",
+		"hw.sdCard=no",
+	}, "\n") + "\n"
+	if err := os.WriteFile(filepath.Join(e.avdDir(), "config.ini"), []byte(cfg), 0o600); err != nil {
+		return err
+	}
+	ini := fmt.Sprintf("avd.ini.encoding=UTF-8\npath=%s\ntarget=%s\n", e.avdDir(), target)
+	return os.WriteFile(filepath.Join(e.Cfg.AVDHome(e.Name), e.avdName()+".ini"), []byte(ini), 0o600)
 }
 
 // applyHardware rewrites the hardware keys every start so config edits apply
@@ -137,10 +184,13 @@ func rewriteINI(path string, want map[string]string) error {
 func (e *Emulator) Args() []string {
 	args := []string{
 		"-avd", e.avdName(), "-port", strconv.Itoa(e.Dev.ConsolePort),
-		"-no-window", "-no-audio", "-no-boot-anim", "-no-snapshot-save",
+		"-no-audio", "-no-boot-anim", "-no-snapshot-save",
 		"-gpu", e.Dev.GPU, "-accel", "on",
 		"-memory", strconv.Itoa(e.Dev.RAM), "-cores", strconv.Itoa(e.Dev.Cores),
 		"-skin", fmt.Sprintf("%dx%d", e.Dev.Width, e.Dev.Height),
+	}
+	if !e.Dev.Window {
+		args = append(args, "-no-window")
 	}
 	return append(args, e.Dev.ExtraArgs...)
 }
@@ -183,6 +233,34 @@ func (e *Emulator) ADB(ctx context.Context, args ...string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, adb, full...)
 	cmd.Env = append(os.Environ(), "ANDROID_ADB_SERVER_PORT="+strconv.Itoa(e.privateServerPort()))
 	return cmd.CombinedOutput()
+}
+
+// Shell runs a command on the device with `adb shell` and returns its
+// combined output and exit status.
+func (e *Emulator) Shell(ctx context.Context, command string) ([]byte, int, error) {
+	out, err := e.ADB(ctx, "shell", command)
+	var ee *exec.ExitError
+	if errors.As(err, &ee) {
+		return out, ee.ExitCode(), nil
+	}
+	return out, 0, err
+}
+
+// Screenshot returns a PNG of the screen.
+func (e *Emulator) Screenshot(ctx context.Context) ([]byte, error) {
+	adb := filepath.Join(e.Cfg.SDK, "platform-tools", "adb")
+	cmd := exec.CommandContext(ctx, adb, "-s", fmt.Sprintf("127.0.0.1:%d", e.ADBPort()), "exec-out", "screencap", "-p")
+	cmd.Env = append(os.Environ(), "ANDROID_ADB_SERVER_PORT="+strconv.Itoa(e.privateServerPort()))
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("%w %s", err, strings.TrimSpace(stderr.String()))
+	}
+	if !strings.HasPrefix(string(out), "\x89PNG") {
+		return nil, fmt.Errorf("not a PNG: %.200q", out)
+	}
+	return out, nil
 }
 
 // Each device gets its own adb server port so emuctl never disturbs the
