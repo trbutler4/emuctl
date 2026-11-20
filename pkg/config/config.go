@@ -23,6 +23,9 @@ import (
 // TTL is the parsed lease lifetime.
 func (c *Config) TTL() time.Duration { d, _ := time.ParseDuration(c.LeaseTTL); return d }
 
+// MaxTTL caps per-lease TTLs requested by clients.
+func (c *Config) MaxTTL() time.Duration { d, _ := time.ParseDuration(c.MaxLeaseTTL); return d }
+
 // HashToken is the stored form of an API token.
 func HashToken(token string) string {
 	sum := sha256.Sum256([]byte(token))
@@ -68,6 +71,9 @@ type Device struct {
 	Width      int    `json:"width,omitempty"`
 	Height     int    `json:"height,omitempty"`
 	Density    int    `json:"density,omitempty"`
+	// Use an existing AVD instead of creating emuctl-NAME under state_dir.
+	AVDHome string `json:"avd_home,omitempty"`
+	AVDName string `json:"avd_name,omitempty"`
 	// Extra emulator flags, appended verbatim.
 	ExtraArgs []string `json:"extra_args,omitempty"`
 }
@@ -81,8 +87,10 @@ type Config struct {
 	Listen string `json:"listen,omitempty"`
 	// HTTP API address. Default 127.0.0.1:7600.
 	API string `json:"api,omitempty"`
-	// Lease lifetime without a heartbeat, e.g. "2m". Default 2m.
-	LeaseTTL string `json:"lease_ttl,omitempty"`
+	// Lease lifetime without a heartbeat, e.g. "2m". Default 2m. Clients may
+	// ask for a longer per-lease TTL up to max_lease_ttl (default 4h).
+	LeaseTTL    string `json:"lease_ttl,omitempty"`
+	MaxLeaseTTL string `json:"max_lease_ttl,omitempty"`
 	// Wipe user data and reboot after every lease, so each user starts clean.
 	ResetOnRelease bool `json:"reset_on_release,omitempty"`
 	// Users and their API tokens. Each value is "sha256:<hex>" of the token.
@@ -146,6 +154,9 @@ func (c *Config) applyDefaults() {
 	if c.LeaseTTL == "" {
 		c.LeaseTTL = "2m"
 	}
+	if c.MaxLeaseTTL == "" {
+		c.MaxLeaseTTL = "4h"
+	}
 	if c.Devices == nil {
 		c.Devices = map[string]Device{}
 	}
@@ -204,6 +215,9 @@ func (c *Config) Validate() error {
 	if _, err := time.ParseDuration(c.LeaseTTL); err != nil {
 		return fmt.Errorf("lease_ttl: %w", err)
 	}
+	if _, err := time.ParseDuration(c.MaxLeaseTTL); err != nil {
+		return fmt.Errorf("max_lease_ttl: %w", err)
+	}
 	for user, h := range c.Users {
 		if !nameRE.MatchString(user) {
 			return fmt.Errorf("user %q: name must match %s", user, nameRE)
@@ -240,8 +254,19 @@ func (c *Config) Validate() error {
 
 // Paths for one device.
 func (c *Config) DeviceDir(name string) string { return filepath.Join(c.StateDir, "devices", name) }
-func (c *Config) AVDHome(name string) string   { return filepath.Join(c.DeviceDir(name), "avd") }
-func (c *Config) LogPath(name string) string   { return filepath.Join(c.DeviceDir(name), "emulator.log") }
+func (c *Config) AVDHome(name string) string {
+	if h := c.Devices[name].AVDHome; h != "" {
+		return h
+	}
+	return filepath.Join(c.DeviceDir(name), "avd")
+}
+func (c *Config) AVDName(name string) string {
+	if n := c.Devices[name].AVDName; n != "" {
+		return n
+	}
+	return "emuctl-" + name
+}
+func (c *Config) LogPath(name string) string { return filepath.Join(c.DeviceDir(name), "emulator.log") }
 func (c *Config) Serial(name string) string {
 	return fmt.Sprintf("emulator-%d", c.Devices[name].ConsolePort)
 }

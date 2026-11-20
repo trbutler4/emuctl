@@ -36,6 +36,7 @@ type Lease struct {
 	Granted  time.Time `json:"granted_at,omitzero"`
 	Expires  time.Time `json:"expires_at,omitzero"`
 	Position int       `json:"position,omitempty"` // 1-based place in queue while queued
+	TTL      Duration  `json:"ttl"`
 
 	seen time.Time // last request/renew from the client
 
@@ -82,14 +83,29 @@ func (m *Manager) known(dev string) bool {
 	return false
 }
 
-// Request enqueues a lease and grants it immediately when possible.
+// Duration marshals as seconds.
+type Duration time.Duration
+
+func (d Duration) MarshalJSON() ([]byte, error) {
+	return []byte(fmt.Sprintf("%d", int64(time.Duration(d)/time.Second))), nil
+}
+
+// Request enqueues a lease and grants it immediately when possible. ttl 0
+// uses the manager default.
 func (m *Manager) Request(user, want, ip, note string) (Lease, error) {
+	return m.RequestTTL(user, want, ip, note, 0)
+}
+
+func (m *Manager) RequestTTL(user, want, ip, note string, ttl time.Duration) (Lease, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if want != "" && !m.known(want) {
 		return Lease{}, fmt.Errorf("unknown device %q", want)
 	}
-	l := &Lease{ID: newID(), User: user, Want: want, ClientIP: ip, Note: note,
+	if ttl <= 0 {
+		ttl = m.TTL
+	}
+	l := &Lease{ID: newID(), User: user, Want: want, ClientIP: ip, Note: note, TTL: Duration(ttl),
 		State: Queued, Queued: m.now(), seen: m.now(), changed: make(chan struct{})}
 	m.all[l.ID] = l
 	m.queue = append(m.queue, l)
@@ -127,7 +143,7 @@ func (m *Manager) dispatch() {
 			continue
 		}
 		free[dev] = false
-		l.Device, l.State, l.Granted, l.Expires = dev, Active, m.now(), m.now().Add(m.TTL)
+		l.Device, l.State, l.Granted, l.Expires = dev, Active, m.now(), m.now().Add(time.Duration(l.TTL))
 		m.holder[dev] = l
 		m.notify(l)
 		if m.Hooks.Granted != nil {
@@ -192,7 +208,7 @@ func (m *Manager) Renew(id string) (Lease, error) {
 	}
 	l.seen = m.now()
 	if l.State == Active {
-		l.Expires = m.now().Add(m.TTL)
+		l.Expires = m.now().Add(time.Duration(l.TTL))
 	}
 	return m.view(l), nil
 }
@@ -238,11 +254,16 @@ func (m *Manager) Sweep() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	now := m.now()
+	// Drop silent waiters first so an expiring holder never hands its device
+	// to an abandoned waiter.
+	for _, l := range append([]*Lease(nil), m.queue...) {
+		if now.Sub(l.seen) > time.Duration(l.TTL) {
+			m.end(l, Expired)
+		}
+	}
 	for _, l := range m.all {
 		switch {
 		case l.State == Active && now.After(l.Expires):
-			m.end(l, Expired)
-		case l.State == Queued && now.Sub(l.seen) > m.TTL:
 			m.end(l, Expired)
 		case (l.State == Released || l.State == Expired) && now.Sub(l.Queued) > 24*time.Hour:
 			delete(m.all, l.ID)

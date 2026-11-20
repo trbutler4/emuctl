@@ -33,7 +33,7 @@ func New(c *config.Config, name string) (*Emulator, error) {
 	return &Emulator{Cfg: c, Name: name, Dev: d}, nil
 }
 
-func (e *Emulator) avdName() string { return "emuctl-" + e.Name }
+func (e *Emulator) avdName() string { return e.Cfg.AVDName(e.Name) }
 func (e *Emulator) avdDir() string  { return filepath.Join(e.Cfg.AVDHome(e.Name), e.avdName()+".avd") }
 func (e *Emulator) ADBPort() int    { return e.Dev.ConsolePort + 1 }
 func (e *Emulator) Serial() string  { return e.Cfg.Serial(e.Name) }

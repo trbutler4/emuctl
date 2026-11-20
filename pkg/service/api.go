@@ -21,7 +21,7 @@ import (
 //
 //	GET    /v1/devices                       device states and holders
 //	GET    /v1/queue                         queued leases in order
-//	POST   /v1/leases {"device":"","note":""} enqueue; device "" = any
+//	POST   /v1/leases {"device","note","ttl_seconds"} enqueue; device "" = any
 //	GET    /v1/leases/{id}?wait=30s          long-poll until granted/changed
 //	POST   /v1/leases/{id}/renew             heartbeat, extends TTL
 //	DELETE /v1/leases/{id}                   release (or leave the queue)
@@ -143,13 +143,18 @@ func (s *Service) Handler() http.Handler {
 		var req struct {
 			Device string `json:"device"`
 			Note   string `json:"note"`
+			TTL    int    `json:"ttl_seconds"` // without heartbeat; default lease_ttl
 		}
 		if r.ContentLength != 0 {
 			if err := json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&req); err != nil {
 				return nil, err
 			}
 		}
-		l, err := s.Leases.Request(user, req.Device, clientIP(r), req.Note)
+		ttl := time.Duration(req.TTL) * time.Second
+		if ttl > s.Cfg.MaxTTL() {
+			return nil, fail(http.StatusBadRequest, "ttl_seconds above max_lease_ttl %s", s.Cfg.MaxTTL())
+		}
+		l, err := s.Leases.RequestTTL(user, req.Device, clientIP(r), req.Note, ttl)
 		if err != nil {
 			return nil, err
 		}
