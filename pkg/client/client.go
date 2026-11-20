@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -21,13 +22,26 @@ type Client struct {
 	HTTP  *http.Client
 }
 
-// FromEnv uses EMUCTL_URL (default http://127.0.0.1:7600) and EMUCTL_TOKEN.
+// FromEnv uses EMUCTL_URL (default http://127.0.0.1:7600) and the token from
+// EMUCTL_TOKEN, else the file EMUCTL_TOKEN_FILE, else ~/.config/emuctl/token.
 func FromEnv() *Client {
 	base := os.Getenv("EMUCTL_URL")
 	if base == "" {
 		base = "http://127.0.0.1:7600"
 	}
-	return &Client{Base: strings.TrimRight(base, "/"), Token: os.Getenv("EMUCTL_TOKEN"),
+	token := os.Getenv("EMUCTL_TOKEN")
+	if token == "" {
+		file := os.Getenv("EMUCTL_TOKEN_FILE")
+		if file == "" {
+			if dir, err := os.UserConfigDir(); err == nil {
+				file = filepath.Join(dir, "emuctl", "token")
+			}
+		}
+		if b, err := os.ReadFile(file); err == nil {
+			token = strings.TrimSpace(string(b))
+		}
+	}
+	return &Client{Base: strings.TrimRight(base, "/"), Token: token,
 		HTTP: &http.Client{Timeout: 10 * time.Minute}}
 }
 

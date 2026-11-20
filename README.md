@@ -43,7 +43,7 @@ lives in `state_dir`, default `~/.local/share/emuctl`.
 ## Clients
 
 ```bash
-export EMUCTL_URL=http://gfxdesktop:7600 EMUCTL_TOKEN=emu_...
+export EMUCTL_URL=http://gfxdesktop:7600 EMUCTL_TOKEN=emu_...   # or put the token in ~/.config/emuctl/token
 emuctl devices
 emuctl queue
 emuctl run -apk app.apk -- maestro test flows/     # queue, install, connect, run, release
