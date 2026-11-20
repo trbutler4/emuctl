@@ -132,3 +132,38 @@ func TestUnknownDevice(t *testing.T) {
 		t.Fatal("want error")
 	}
 }
+
+func TestHoldOnEndBlocksHandoffUntilDone(t *testing.T) {
+	m, _ := setup("a")
+	m.HoldOnEnd = true
+	l1, _ := m.Request("u1", "", "", "")
+	l2, _ := m.Request("u2", "", "", "")
+	m.Release(l1.ID)
+	if g, _ := m.Get(l2.ID, 0); g.State != Queued {
+		t.Fatal("next waiter must not get the device before cleanup is done")
+	}
+	m.Done("a")
+	if g, _ := m.Get(l2.ID, 0); g.State != Active {
+		t.Fatal("next waiter granted after Done")
+	}
+}
+
+func TestHoldSkipsLeasedAndBlocksGrants(t *testing.T) {
+	m, _ := setup("a")
+	l1, _ := m.Request("u1", "", "", "")
+	if m.Hold("a") {
+		t.Fatal("Hold must refuse a leased device")
+	}
+	m.Release(l1.ID)
+	if !m.Hold("a") || m.Hold("a") {
+		t.Fatal("Hold must take a free device exactly once")
+	}
+	l2, _ := m.Request("u2", "", "", "")
+	if l2.State != Queued {
+		t.Fatal("held device must not be granted")
+	}
+	m.Done("a")
+	if g, _ := m.Get(l2.ID, 0); g.State != Active {
+		t.Fatal("grant after Done")
+	}
+}

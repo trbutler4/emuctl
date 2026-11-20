@@ -560,6 +560,57 @@ func acquire(ctx context.Context, args []string) error {
 	return err
 }
 
+// sizing warns when the configured devices ask for more than the host has.
+// Emulators under CPU contention boot slowly and drop adb ("offline"), and
+// an overloaded host fails every device, not just the extra one.
+func sizing(c *config.Config) {
+	cores, ram := 0, 0
+	for _, d := range c.Devices {
+		cores += d.Cores
+		ram += d.RAM
+	}
+	host := runtime.NumCPU()
+	msg := fmt.Sprintf("%d device(s) ask for %d cores and %d MB RAM; host has %d cores", len(c.Devices), cores, ram, host)
+	if mem := hostMemMB(); mem > 0 {
+		msg += fmt.Sprintf(" and %d MB", mem)
+		if ram > mem*3/4 {
+			fmt.Println("warn ", msg+": RAM over 75%, expect swapping and boot timeouts")
+			return
+		}
+	}
+	if cores > host {
+		fmt.Println("warn ", msg+": cores oversubscribed, expect slow boots and adb offline under load. Lower devices' \"cores\" or the device count, and measure under real load")
+		return
+	}
+	fmt.Println("note ", msg)
+}
+
+// hostMemMB is total RAM in MB, or 0 if unknown.
+func hostMemMB() int {
+	switch runtime.GOOS {
+	case "linux":
+		b, err := os.ReadFile("/proc/meminfo")
+		if err != nil {
+			return 0
+		}
+		var kb int
+		for _, line := range strings.Split(string(b), "\n") {
+			if _, err := fmt.Sscanf(line, "MemTotal: %d kB", &kb); err == nil {
+				return kb / 1024
+			}
+		}
+	case "darwin":
+		out, err := exec.Command("sysctl", "-n", "hw.memsize").Output()
+		if err != nil {
+			return 0
+		}
+		var n int64
+		fmt.Sscan(strings.TrimSpace(string(out)), &n)
+		return int(n >> 20)
+	}
+	return 0
+}
+
 // doctor checks that `emuctl serve` can start every configured device.
 func doctor(args []string) error {
 	fs := flag.NewFlagSet("doctor", flag.ExitOnError)
@@ -611,6 +662,7 @@ func doctor(args []string) error {
 	} else {
 		fmt.Printf("note  %d user(s), API on %s, adb forwarders on %s\n", len(c.Users), c.API, c.Listen)
 	}
+	sizing(c)
 	if bad > 0 {
 		return fmt.Errorf("%d problem(s)", bad)
 	}

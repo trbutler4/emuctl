@@ -21,16 +21,20 @@ import (
 
 // DeviceStatus is reported per device by GET /v1/devices.
 type DeviceStatus struct {
-	Name     string       `json:"name"`
-	State    string       `json:"state"` // stopped | starting | booted | crashed | resetting
-	Serial   string       `json:"serial"`
-	ADB      string       `json:"adb,omitempty"` // host:port for `adb connect`, when exposed
-	Profile  string       `json:"profile"`
-	Since    time.Time    `json:"since"`
-	Restarts int          `json:"restarts"`
-	LastErr  string       `json:"last_error,omitempty"`
-	APK      string       `json:"apk,omitempty"` // store key last installed by emuctl; cleared by wipe or ad hoc install
-	Holder   *lease.Lease `json:"holder,omitempty"`
+	Name     string    `json:"name"`
+	State    string    `json:"state"` // stopped | starting | booted | crashed | resetting
+	Serial   string    `json:"serial"`
+	ADB      string    `json:"adb,omitempty"` // host:port for `adb connect`, when exposed
+	Profile  string    `json:"profile"`
+	Since    time.Time `json:"since"`
+	Restarts int       `json:"restarts"`
+	LastErr  string    `json:"last_error,omitempty"`
+	APK      string    `json:"apk,omitempty"` // store key last installed by emuctl; cleared by wipe or ad hoc install
+	// Checked is the last passing health check. Unverified counts
+	// consecutive inconclusive checks since then.
+	Checked    time.Time    `json:"checked,omitzero"`
+	Unverified int          `json:"unverified,omitempty"`
+	Holder     *lease.Lease `json:"holder,omitempty"`
 }
 
 type device struct {
@@ -41,6 +45,9 @@ type device struct {
 	stop context.CancelFunc
 	done chan struct{}
 	wipe bool
+	// ctl serializes start/halt/reset so two resets can never run two
+	// supervisors (and two emulators) for one device.
+	ctl sync.Mutex
 }
 
 type Service struct {
@@ -51,8 +58,9 @@ type Service struct {
 	devs   map[string]*device
 	ctx    context.Context
 
-	// installFn replaces adb install in tests.
+	// Test hooks: replace adb install and the release/health adb operations.
 	installFn func(ctx context.Context, device, path string) (string, error)
+	opsFn     func(device string) deviceOps
 }
 
 func New(c *config.Config, log *slog.Logger) (*Service, error) {
@@ -60,6 +68,7 @@ func New(c *config.Config, log *slog.Logger) (*Service, error) {
 		APKs: &apkstore.Store{Dir: filepath.Join(c.StateDir, "apks")}}
 	s.Leases = lease.NewManager(c.Names(), c.TTL())
 	s.Leases.Hooks = lease.Hooks{Granted: s.onGrant, Ended: s.onEnd}
+	s.Leases.HoldOnEnd = true
 	for _, name := range c.Names() {
 		e, err := emulator.New(c, name)
 		if err != nil {
@@ -96,20 +105,14 @@ func (s *Service) onGrant(l lease.Lease) {
 	s.Log.Info("lease granted", "lease", l.ID, "user", l.User, "device", l.Device, "client", l.ClientIP)
 }
 
-func (s *Service) onEnd(l lease.Lease) {
-	s.Log.Info("lease ended", "lease", l.ID, "user", l.User, "device", l.Device, "state", l.State)
-	d := s.devs[l.Device]
-	if d.fwd != nil {
-		d.fwd.CloseAll()
-	}
-	if s.Cfg.ResetOnRelease {
-		s.reset(d, true)
-	}
-}
-
 // Run starts every device, the forwarders and the lease sweeper, then
 // serves the API until ctx is done.
 func (s *Service) Run(ctx context.Context) error {
+	unlock, err := emulator.LockStateDir(s.Cfg.StateDir)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	s.ctx = ctx
 	var wg sync.WaitGroup
 	for _, name := range s.Cfg.Names() {
@@ -123,7 +126,12 @@ func (s *Service) Run(ctx context.Context) error {
 				}
 			}()
 		}
+		d.ctl.Lock()
 		s.start(d)
+		d.ctl.Unlock()
+	}
+	if every := s.Cfg.HealthEvery(); every > 0 {
+		go s.healthLoop(ctx, every)
 	}
 	go func() {
 		t := time.NewTicker(5 * time.Second)
@@ -137,9 +145,11 @@ func (s *Service) Run(ctx context.Context) error {
 			}
 		}
 	}()
-	err := s.serveAPI(ctx)
+	err = s.serveAPI(ctx)
 	for _, d := range s.devs {
+		d.ctl.Lock()
 		s.halt(d)
+		d.ctl.Unlock()
 	}
 	wg.Wait()
 	return err
@@ -151,13 +161,14 @@ func (s *Service) set(d *device, f func(*DeviceStatus)) {
 	d.mu.Unlock()
 }
 
+// start launches the device supervisor. Caller holds d.ctl.
 func (s *Service) start(d *device) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if d.stop != nil {
 		return
 	}
-	ctx, cancel := context.WithCancel(s.ctx)
+	ctx, cancel := context.WithCancel(s.baseCtx())
 	d.stop, d.done = cancel, make(chan struct{})
 	go func() {
 		defer close(d.done)
@@ -165,6 +176,7 @@ func (s *Service) start(d *device) {
 	}()
 }
 
+// halt stops the supervisor and waits for the emulator to exit. Caller holds d.ctl.
 func (s *Service) halt(d *device) {
 	d.mu.Lock()
 	cancel, done := d.stop, d.done
@@ -181,6 +193,8 @@ func (s *Service) halt(d *device) {
 // reset restarts the emulator, wiping user data when wipe is set. The device
 // takes no new leases until it boots again.
 func (s *Service) reset(d *device, wipe bool) {
+	d.ctl.Lock()
+	defer d.ctl.Unlock()
 	s.halt(d)
 	d.mu.Lock()
 	d.wipe = wipe
@@ -221,6 +235,11 @@ func (s *Service) supervise(ctx context.Context, d *device) {
 }
 
 func (s *Service) runOnce(ctx context.Context, d *device, log *slog.Logger) error {
+	if n, err := d.emu.ReapStale(ctx); err != nil {
+		return err
+	} else if n > 0 {
+		log.Warn("stopped emulator processes left running by an earlier emuctl", "count", n)
+	}
 	if err := d.emu.Create(ctx); err != nil {
 		return err
 	}
@@ -263,7 +282,8 @@ func (s *Service) runOnce(ctx context.Context, d *device, log *slog.Logger) erro
 				continue
 			}
 			log.Info("booted")
-			s.set(d, func(st *DeviceStatus) { st.State, st.Since = "booted", time.Now() })
+			s.prepare(ctx, d, log)
+			s.set(d, func(st *DeviceStatus) { st.State, st.Since, st.Checked = "booted", time.Now(), time.Now() })
 			s.Leases.SetBusy(d.emu.Name, false)
 		}
 	}

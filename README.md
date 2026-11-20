@@ -15,9 +15,14 @@ pool of emulators with your team and CI.
   device or any device. Leases expire without a heartbeat, so a crashed agent
   frees its device within `lease_ttl`.
 - **Supervision.** Emulators restart on crash or boot timeout, with backoff. A
-  device takes no leases until Android has booted and unlocked.
-- **Clean devices.** Wipe and reboot on request, or after every lease with
-  `reset_on_release`.
+  device takes no leases until Android has booted and unlocked. Idle devices
+  are health-checked, and a device is only restarted on evidence it is
+  broken, never because a check timed out. Emulators left behind by a killed
+  `emuctl serve` are stopped on the next start.
+- **Clean devices.** Between leases, clear your app's data without a reboot
+  (`"release": "clear"`) or wipe and reboot (`"release": "wipe"`). Nobody
+  gets the device until cleanup and a health check finish. Animations are
+  turned off after boot and on every release.
 - **Holder-only adb.** Optionally forward each device's adb port. Only the
   current holder's IP can connect, and connections are dropped when the lease
   ends. That's enough for `adb`, Maestro, Appium or Android Studio.
@@ -145,7 +150,11 @@ existing app fails with `INSTALL_FAILED_UPDATE_INCOMPATIBLE`.
   "lease_ttl": "2m",               // lease lifetime without a heartbeat
   "max_lease_ttl": "4h",
   "boot_timeout": "6m",
-  "reset_on_release": false,       // wipe the device after every lease
+  "release": "none",               // between leases: none | clear | wipe (see below)
+  "release_packages": [],          // packages to force-stop and `pm clear` with "clear"
+  "release_commands": [],          // adb shell commands run on every release; failure restarts the device
+  "disable_animations": true,      // animations off after boot and on release
+  "health_interval": "2m",         // idle health checks, "0" disables
   "users": {},                     // name -> "sha256:..." token hash; empty = no auth, loopback only
   "devices": {
     "pixel-1": { "expose_port": 15601 },
@@ -206,8 +215,47 @@ Security notes:
   so only your clients can reach them. Leave `expose_port` unset if clients
   only use the MCP tools or the API.
 - Anyone holding a lease has full control of that emulator, including
-  `adb shell`. Treat emulators as disposable and use `reset_on_release` when
-  sharing them.
+  `adb shell`. Treat emulators as disposable and use `"release": "wipe"` when
+  sharing them with people you don't trust (`clear` only resets the listed apps).
+
+## Between leases
+
+When a lease ends, the device stays out of the pool until emuctl has:
+
+1. dropped the old holder's adb connections,
+2. cleaned up according to `release`,
+3. run `release_commands` and turned animations off (skipped for `wipe`),
+4. health-checked the device.
+
+| `release` | Effect | Keeps installed APKs |
+| --- | --- | --- |
+| `none` | Nothing. Fastest; the next user sees the last app state. | yes |
+| `clear` | `am force-stop` and `pm clear` each of `release_packages`. Seconds, no reboot. | yes |
+| `wipe` | Reboot with `-wipe-data`. Minutes. | no |
+
+For an app under test, `clear` is usually right: every lease starts signed
+out with fresh app data, and stored APKs don't need reinstalling.
+
+```jsonc
+"release": "clear",
+"release_packages": ["com.example.app", "com.example.app.dev"],
+"release_commands": ["rm -f /data/local/tmp/my-test-marker"]
+```
+
+A failing cleanup step restarts the device. Health checks run on release and
+every `health_interval` on idle devices. A device is restarted only on
+evidence it is broken (its adb port is closed, or Android reports it is no
+longer booted). A check that times out or can't reach adb is logged and
+counted in `unverified` on `emuctl devices`, but the device stays in service,
+so a slow host never restarts healthy emulators.
+
+## Sizing
+
+Emulators under CPU contention boot slowly and drop to `adb offline`, and an
+overloaded host tends to fail every device, not just the extra one. `emuctl
+doctor` warns when the configured `cores` or `ram_mb` add up to more than the
+host has. Measure under real load: one report saw a 5th emulator on a 48-core
+host time out on boot while the others ran tests.
 
 ## Over SSH (no open ports)
 

@@ -65,3 +65,30 @@ func TestOpenModeLoopbackOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestReleaseConfig(t *testing.T) {
+	base := func(extra string) error {
+		_, err := Parse([]byte(`{"sdk":"/x",` + extra + `"devices":{"p1":{}}}`))
+		return err
+	}
+	for extra, ok := range map[string]bool{
+		``:                   true,
+		`"release":"wipe",`:  true,
+		`"release":"clear",`: false, // needs packages
+		`"release":"clear","release_packages":["com.example.app"],`: true,
+		`"release":"clear","release_packages":["not a pkg"],`:       false,
+		`"release":"reboot",`:     false,
+		`"health_interval":"0",`:  true,
+		`"health_interval":"1s",`: false,
+		`"lease_ttl":"0s",`:       false,
+		`"lease_ttl":"5h",`:       false, // above max_lease_ttl
+	} {
+		if err := base(extra); (err == nil) != ok {
+			t.Errorf("%s: err=%v, want ok=%v", extra, err, ok)
+		}
+	}
+	c, _ := Parse([]byte(`{"sdk":"/x","reset_on_release":true,"devices":{}}`))
+	if c.Release != ReleaseWipe || !*c.DisableAnimations {
+		t.Fatalf("legacy reset_on_release must map to wipe: %+v", c)
+	}
+}

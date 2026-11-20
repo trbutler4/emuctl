@@ -28,6 +28,7 @@ func testService(t *testing.T) (*Service, *httptest.Server) {
 	}
 	// Pretend p1 booted, without launching anything.
 	s.devs["p1"].st.State = "booted"
+	s.opsFn = func(string) deviceOps { return &fakeOps{} }
 	s.Leases.SetBusy("p1", false)
 	srv := httptest.NewServer(s.Handler())
 	t.Cleanup(srv.Close)

@@ -98,8 +98,25 @@ type Config struct {
 	// ask for a longer per-lease TTL up to max_lease_ttl (default 4h).
 	LeaseTTL    string `json:"lease_ttl,omitempty"`
 	MaxLeaseTTL string `json:"max_lease_ttl,omitempty"`
-	// Wipe user data and reboot after every lease, so each user starts clean.
+	// Wipe user data and reboot after every lease. Deprecated: use
+	// "release": "wipe".
 	ResetOnRelease bool `json:"reset_on_release,omitempty"`
+	// What happens to a device when its lease ends, before the next lease:
+	//   "none"  nothing (default)
+	//   "clear" force-stop and `pm clear` each of release_packages; the
+	//           device stays booted and keeps its installed apps
+	//   "wipe"  reboot with -wipe-data (slow, removes installed APKs)
+	Release string `json:"release,omitempty"`
+	// Packages to clear on release with "release": "clear".
+	ReleasePackages []string `json:"release_packages,omitempty"`
+	// adb shell commands run on every release, after clearing (any mode but
+	// wipe). A failing command marks the device broken and restarts it.
+	ReleaseCommands []string `json:"release_commands,omitempty"`
+	// Turn off window, transition and animator animations after boot and
+	// on every release. Default true; animations cause flaky UI automation.
+	DisableAnimations *bool `json:"disable_animations,omitempty"`
+	// How often idle devices are health-checked. Default 2m, "0" disables.
+	HealthInterval string `json:"health_interval,omitempty"`
 	// How long a cold boot may take before the emulator is killed and
 	// restarted. Default 6m.
 	BootTimeout string `json:"boot_timeout,omitempty"`
@@ -111,6 +128,18 @@ type Config struct {
 }
 
 var nameRE = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
+
+var pkgRE = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)+$`)
+
+// Release modes.
+const (
+	ReleaseNone  = "none"
+	ReleaseClear = "clear"
+	ReleaseWipe  = "wipe"
+)
+
+// HealthEvery is the parsed idle health-check interval, 0 when disabled.
+func (c *Config) HealthEvery() time.Duration { d, _ := time.ParseDuration(c.HealthInterval); return d }
 
 func DefaultPath() string {
 	if p := os.Getenv("EMUCTL_CONFIG"); p != "" {
@@ -247,6 +276,19 @@ func (c *Config) applyDefaults() {
 	if c.BootTimeout == "" {
 		c.BootTimeout = "6m"
 	}
+	if c.Release == "" {
+		c.Release = ReleaseNone
+		if c.ResetOnRelease {
+			c.Release = ReleaseWipe
+		}
+	}
+	if c.DisableAnimations == nil {
+		t := true
+		c.DisableAnimations = &t
+	}
+	if c.HealthInterval == "" {
+		c.HealthInterval = "2m"
+	}
 	if c.StateDir == "" {
 		base := os.Getenv("XDG_DATA_HOME")
 		if base == "" {
@@ -329,6 +371,29 @@ func (c *Config) Validate() error {
 	}
 	if d, err := time.ParseDuration(c.BootTimeout); err != nil || d <= 0 {
 		return fmt.Errorf("boot_timeout: must be a positive duration like \"6m\"")
+	}
+	if d, _ := time.ParseDuration(c.LeaseTTL); d <= 0 {
+		return errors.New("lease_ttl: must be positive")
+	}
+	if c.MaxTTL() < c.TTL() {
+		return errors.New("max_lease_ttl must be at least lease_ttl")
+	}
+	if d, err := time.ParseDuration(c.HealthInterval); err != nil || d < 0 || (d > 0 && d < 10*time.Second) {
+		return errors.New("health_interval: must be \"0\" (off) or at least \"10s\"")
+	}
+	switch c.Release {
+	case ReleaseNone, ReleaseWipe:
+	case ReleaseClear:
+		if len(c.ReleasePackages) == 0 {
+			return errors.New("release \"clear\" needs release_packages, e.g. [\"com.example.app\"]")
+		}
+	default:
+		return fmt.Errorf("release: %q must be none, clear or wipe", c.Release)
+	}
+	for _, p := range c.ReleasePackages {
+		if !pkgRE.MatchString(p) {
+			return fmt.Errorf("release_packages: %q is not an Android package name", p)
+		}
 	}
 	if c.Open() && (!isLoopback(c.API) || !isLoopback(c.Listen)) {
 		return errors.New("no users configured: api and listen must be loopback (127.0.0.1) unless you add users with `emuctl add-user NAME`")

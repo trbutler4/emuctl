@@ -55,16 +55,21 @@ type Manager struct {
 	mu      sync.Mutex
 	devices []string
 	busy    map[string]bool // device unavailable (e.g. resetting, not booted)
+	maint   map[string]bool // held for maintenance (release cleanup, health check)
 	holder  map[string]*Lease
 	queue   []*Lease
 	all     map[string]*Lease
 	TTL     time.Duration
 	Hooks   Hooks
-	now     func() time.Time
+	// HoldOnEnd keeps a device out of the pool when its lease ends until the
+	// owner calls Done, so the Ended hook finishes cleanup before anyone else
+	// is granted the device.
+	HoldOnEnd bool
+	now       func() time.Time
 }
 
 func NewManager(devices []string, ttl time.Duration) *Manager {
-	return &Manager{devices: devices, busy: map[string]bool{}, holder: map[string]*Lease{},
+	return &Manager{devices: devices, busy: map[string]bool{}, maint: map[string]bool{}, holder: map[string]*Lease{},
 		all: map[string]*Lease{}, TTL: ttl, now: time.Now}
 }
 
@@ -117,7 +122,7 @@ func (m *Manager) RequestTTL(user, want, ip, note string, ttl time.Duration) (Le
 func (m *Manager) dispatch() {
 	free := map[string]bool{}
 	for _, d := range m.devices {
-		free[d] = m.holder[d] == nil && !m.busy[d]
+		free[d] = m.holder[d] == nil && !m.busy[d] && !m.maint[d]
 	}
 	rest := m.queue[:0]
 	for _, l := range m.queue {
@@ -235,6 +240,9 @@ func (m *Manager) end(l *Lease, st State) {
 		}
 	case Active:
 		delete(m.holder, l.Device)
+		if m.HoldOnEnd {
+			m.maint[l.Device] = true
+		}
 		if m.Hooks.Ended != nil {
 			v := *l
 			v.State = st
@@ -268,6 +276,29 @@ func (m *Manager) Sweep() {
 		case (l.State == Released || l.State == Expired) && now.Sub(l.Queued) > 24*time.Hour:
 			delete(m.all, l.ID)
 		}
+	}
+}
+
+// Hold takes a free device out of the pool for maintenance, such as an idle
+// health check. It reports false if the device is leased, busy or already
+// held. Call Done when finished.
+func (m *Manager) Hold(dev string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.holder[dev] != nil || m.busy[dev] || m.maint[dev] {
+		return false
+	}
+	m.maint[dev] = true
+	return true
+}
+
+// Done returns a device held by Hold or HoldOnEnd to the pool.
+func (m *Manager) Done(dev string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.maint[dev] {
+		delete(m.maint, dev)
+		m.dispatch()
 	}
 }
 
