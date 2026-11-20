@@ -33,7 +33,13 @@ func FromEnv() *Client {
 	if token == "" {
 		file := os.Getenv("EMUCTL_TOKEN_FILE")
 		if file == "" {
-			if dir, err := os.UserConfigDir(); err == nil {
+			// Use XDG-style ~/.config on every OS (os.UserConfigDir is
+			// ~/Library/Application Support on macOS).
+			if dir := os.Getenv("XDG_CONFIG_HOME"); dir != "" {
+				file = filepath.Join(dir, "emuctl", "token")
+			} else if home, err := os.UserHomeDir(); err == nil {
+				file = filepath.Join(home, ".config", "emuctl", "token")
+			} else if dir, err := os.UserConfigDir(); err == nil {
 				file = filepath.Join(dir, "emuctl", "token")
 			}
 		}
