@@ -33,6 +33,7 @@ Server (on the emulator host):
   emuctl serve [-config PATH]          run emulators, lease queue and API
   emuctl init [-config PATH]           write an example config
   emuctl add-user NAME [-config PATH]  create a user, print its token once
+  emuctl new-token                     print a token (stdout) and its config hash (stderr)
 
 Client (EMUCTL_URL, EMUCTL_TOKEN):
   emuctl devices                       device states and holders
@@ -69,6 +70,12 @@ func main() {
 		err = initConfig(args)
 	case "add-user":
 		err = addUser(args)
+	case "new-token":
+		b := make([]byte, 24)
+		rand.Read(b)
+		token := "emu_" + hex.EncodeToString(b)
+		fmt.Println(token)
+		fmt.Fprintln(os.Stderr, "config users entry:", config.HashToken(token))
 	case "devices":
 		err = devices(ctx)
 	case "queue":
