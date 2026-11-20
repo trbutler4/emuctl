@@ -45,7 +45,8 @@ Server (on the emulator host):
   emuctl add-user NAME [-config PATH]  create a user, print its token once
   emuctl new-token                     print a token (stdout) and its config hash (stderr)
 
-Client (EMUCTL_URL, default http://127.0.0.1:7600; EMUCTL_TOKEN or ~/.config/emuctl/token):
+Client (EMUCTL_URL: http://host:7600 or ssh://[user@]host, default http://127.0.0.1:7600;
+        token from EMUCTL_TOKEN or ~/.config/emuctl/token):
   emuctl devices                       device states and holders
   emuctl queue                         waiting leases
   emuctl run [flags] -- CMD ARGS...    wait for a device, run CMD, release
