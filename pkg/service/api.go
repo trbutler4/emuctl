@@ -35,7 +35,7 @@ import (
 //	GET    /v1/leases/{id}/screenshot        PNG of the screen
 //	GET    /v1/devices/{name}/logs           tail of the emulator log
 //	GET    /metrics                          Prometheus metrics (or on metrics_addr)
-//	POST   /v1/devices/{name}/restart        admin: force restart (ends lease)
+//	POST   /v1/devices/{name}/restart        force restart a device that is free or leased by you
 func (s *Service) serveAPI(ctx context.Context) error {
 	srv := &http.Server{Addr: s.Cfg.API, Handler: s.Handler(), ReadHeaderTimeout: 10 * time.Second}
 	if s.Cfg.MetricsAddr != "" && s.Cfg.MetricsAddr != s.Cfg.API {

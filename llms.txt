@@ -1,0 +1,21 @@
+# emuctl
+
+> Shared pool of Android emulators for people and AI agents: FIFO lease queue, MCP server, holder-only adb, APK store, Prometheus metrics. Lease a device, use it, release it.
+
+Start with docs/quickstart.md. Key rules: always release (run and MCP do it for you), hold one lease at a time, keep it alive with heartbeats, and set up app state inside your own lease.
+
+## Docs
+
+- [Index and rules](docs/README.md): what to read, terms, the rules that matter
+- [Quickstart](docs/quickstart.md): `emuctl run -- CMD`, `acquire`, MCP loop
+- [APKs](docs/apks.md): `-apk`, and the APK store keyed by native fingerprint (`-apk-key`, `apk put`)
+- [MCP](docs/mcp.md): tools, arguments, the agent loop
+- [CLI](docs/cli.md): all commands, `run` flags, exit codes
+- [HTTP API](docs/api.md): endpoints, lease lifecycle with curl, status codes
+- [Operating](docs/operating.md): config, release modes, health checks, sizing, metrics
+- [Troubleshooting](docs/troubleshooting.md): symptom, cause, fix
+
+## Optional
+
+- [README](README.md): full project overview, install, security notes, metric list
+- [Alert rules](contrib/prometheus/emuctl-alerts.yml)

@@ -8,6 +8,9 @@ Use it on one laptop to give your coding agent an emulator it can install
 builds on, tap around in and screenshot. Or run it on a build box and share a
 pool of emulators with your team and CI.
 
+**Agents and LLMs:** start at [`llms.txt`](llms.txt) or
+[`docs/`](docs/README.md), which cover usage in short, task-focused pages.
+
 - **MCP server.** `emuctl mcp` gives agents tools to acquire a device, run
   `adb shell` commands, take screenshots, install APKs, reset and release.
   Agents don't need adb or the Android SDK on their machine.
