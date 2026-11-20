@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -24,6 +25,13 @@ type Forwarder struct {
 
 	mu    sync.Mutex
 	conns map[net.Conn]struct{}
+
+	accepted, refused, open atomic.Int64
+}
+
+// Stats reports connections admitted and refused so far, and proxied now.
+func (f *Forwarder) Stats() (accepted, refused, open int64) {
+	return f.accepted.Load(), f.refused.Load(), f.open.Load()
 }
 
 // CloseAll drops every open connection (lease ended or changed hands).
@@ -88,9 +96,13 @@ func (f *Forwarder) handle(ctx context.Context, c net.Conn, logger *slog.Logger)
 	defer c.Close()
 	ip, _, _ := net.SplitHostPort(c.RemoteAddr().String())
 	if f.Allow == nil || !f.Allow(ip) {
+		f.refused.Add(1)
 		logger.Info("refused: no active lease for client", "client", ip)
 		return
 	}
+	f.accepted.Add(1)
+	f.open.Add(1)
+	defer f.open.Add(-1)
 	f.track(c, true)
 	defer f.track(c, false)
 	d := net.Dialer{Timeout: 5 * time.Second}

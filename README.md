@@ -298,6 +298,57 @@ Restart=on-failure
 WantedBy=default.target
 ```
 
+## Metrics
+
+`emuctl serve` exposes Prometheus metrics at `/metrics`. By default it shares
+the API listener and needs a token like every other endpoint:
+
+```yaml
+scrape_configs:
+  - job_name: emuctl
+    authorization: {credentials_file: /etc/prometheus/emuctl-token}
+    static_configs: [{targets: ["emulator-host:7600"]}]
+```
+
+Or set `"metrics_addr": "127.0.0.1:9600"` to serve `/metrics` on its own
+listener without a token. Bind it to loopback or a monitoring network only.
+
+| Metric | Labels | |
+| --- | --- | --- |
+| `emuctl_device_state` | device, state | 1 for the current state (stopped, starting, booted, crashed, resetting) |
+| `emuctl_device_leased` | device | 1 while leased |
+| `emuctl_device_state_seconds` | device | time in the current state |
+| `emuctl_device_health_unverified` | device | inconclusive checks in a row (restarts at 3) |
+| `emuctl_device_last_healthy_timestamp_seconds` | device | last passing check or boot |
+| `emuctl_emulator_boots_total` | device, result | ok, timeout |
+| `emuctl_emulator_boot_seconds` | device | start to booted and unlocked |
+| `emuctl_emulator_exits_total` | device | unexpected exits |
+| `emuctl_device_restarts_total` | device, reason | broken, unverified, cleanup, wipe, request |
+| `emuctl_stale_emulators_reaped_total` | device | leftovers from an earlier emuctl |
+| `emuctl_health_checks_total` | device, trigger, result | trigger idle or release; result healthy, unknown, broken |
+| `emuctl_leases_granted_total`, `emuctl_leases_ended_total` | device (, reason) | reason released or expired |
+| `emuctl_lease_queue_wait_seconds` | device | request to grant |
+| `emuctl_lease_duration_seconds` | device, reason | grant to end |
+| `emuctl_queue_length` | want | device name or `any` |
+| `emuctl_queue_oldest_wait_seconds` | | |
+| `emuctl_release_cleanup_seconds`, `emuctl_release_cleanup_failures_total` | device | |
+| `emuctl_apk_installs_total` | device, source, result | source store or upload; result installed, skipped, failed |
+| `emuctl_apk_install_seconds` | device, source | |
+| `emuctl_apk_uploads_total` | result | stored, exists, rejected |
+| `emuctl_apk_store_entries`, `emuctl_apk_store_bytes` | | |
+| `emuctl_adb_forward_connections_total` | device, result | accepted, refused (not the lease holder) |
+| `emuctl_adb_forward_open_connections` | device | |
+| `emuctl_http_requests_total`, `emuctl_http_request_seconds` | route (, code) | route is the pattern, e.g. `GET /v1/leases/{id}` |
+| `emuctl_build_info` | version | |
+
+Labels stay bounded: device names come from the config, and lease IDs, users
+and APK keys are never labels. Use the logs for per-lease detail.
+
+Alert rules for the common failures (no booted device, flapping or
+slow-booting devices, a growing queue, failing cleanups or installs, API
+errors) are in
+[`contrib/prometheus/emuctl-alerts.yml`](contrib/prometheus/emuctl-alerts.yml).
+
 ## HTTP API
 
 Bearer token auth (none in open mode), JSON.

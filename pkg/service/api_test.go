@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
@@ -166,5 +167,72 @@ func TestStoredAPKInstall(t *testing.T) {
 	s.halt(s.devs["p1"])
 	if ds, _ := alice.Devices(ctx); ds[0].APK != "" {
 		t.Fatalf("wipe must clear device apk, got %q", ds[0].APK)
+	}
+}
+
+func scrape(t *testing.T, url, token string) (int, string) {
+	t.Helper()
+	req, _ := http.NewRequest("GET", url+"/metrics", nil)
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, string(b)
+}
+
+func TestMetricsEndpoint(t *testing.T) {
+	s, srv := testService(t)
+	s.installFn = func(ctx context.Context, device, path string) (string, error) { return "Success", nil }
+	ctx := context.Background()
+	alice := &client.Client{Base: srv.URL, Token: "a", HTTP: srv.Client()}
+	if code, _ := scrape(t, srv.URL, ""); code != http.StatusUnauthorized {
+		t.Fatalf("metrics on the API listener need a token, got %d", code)
+	}
+	l, err := alice.Acquire(ctx, "", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	alice.PutAPK(ctx, "android-f1", strings.NewReader("apk"))
+	alice.PutAPK(ctx, "android-f1", strings.NewReader("apk"))
+	alice.InstallStored(ctx, l.ID, "android-f1")
+	alice.InstallStored(ctx, l.ID, "android-f1")
+	alice.Release(ctx, l.ID)
+	time.Sleep(100 * time.Millisecond) // release cleanup runs async
+	code, body := scrape(t, srv.URL, "a")
+	if code != 200 {
+		t.Fatalf("scrape: %d %s", code, body)
+	}
+	for _, want := range []string{
+		`emuctl_build_info{version="dev"} 1`,
+		`emuctl_device_state{device="p1",state="booted"} 1`,
+		`emuctl_device_state{device="p1",state="crashed"} 0`,
+		`emuctl_device_leased{device="p1"} 0`,
+		`emuctl_leases_granted_total{device="p1"} 1`,
+		`emuctl_leases_ended_total{device="p1",reason="released"} 1`,
+		`emuctl_lease_queue_wait_seconds_count{device="p1"} 1`,
+		`emuctl_health_checks_total{device="p1",trigger="release",result="healthy"} 1`,
+		`emuctl_release_cleanup_seconds_count{device="p1"} 1`,
+		`emuctl_apk_uploads_total{result="stored"} 1`,
+		`emuctl_apk_uploads_total{result="exists"} 1`,
+		`emuctl_apk_installs_total{device="p1",source="store",result="installed"} 1`,
+		`emuctl_apk_installs_total{device="p1",source="store",result="skipped"} 1`,
+		`emuctl_apk_store_entries 1`,
+		`emuctl_queue_length{want="any"} 0`,
+		`emuctl_http_requests_total{route="POST /v1/leases",code="200"} 1`,
+		`emuctl_http_requests_total{route="PUT /v1/apks/{key}",code="409"} 1`,
+		`emuctl_adb_forward_connections_total{device="p1",result="refused"} 0`,
+	} {
+		if !strings.Contains(body, want+"\n") {
+			t.Errorf("missing %s", want)
+		}
+	}
+	// Lease IDs and APK keys must never appear as labels.
+	if strings.Contains(body, l.ID) || strings.Contains(body, "android-f1") {
+		t.Error("high-cardinality value leaked into metrics")
 	}
 }

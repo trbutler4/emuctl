@@ -1,0 +1,89 @@
+# Prometheus alerting rules for emuctl. Load with:
+#   rule_files: [/path/to/emuctl/contrib/prometheus/emuctl-alerts.yml]
+# Check with: promtool check rules contrib/prometheus/emuctl-alerts.yml
+groups:
+  - name: emuctl
+    rules:
+      - alert: EmuctlDown
+        expr: up{job="emuctl"} == 0
+        for: 2m
+        labels: {severity: page}
+        annotations:
+          summary: "emuctl on {{ $labels.instance }} is not being scraped"
+
+      - alert: EmuctlNoDeviceAvailable
+        # Every device is unusable (not booted), so nobody can get a lease.
+        expr: sum by (instance) (emuctl_device_state{state="booted"}) == 0
+        for: 10m
+        labels: {severity: page}
+        annotations:
+          summary: "No emuctl device on {{ $labels.instance }} has been booted for 10m"
+
+      - alert: EmuctlDeviceDown
+        expr: emuctl_device_state{state="booted"} == 0 and emuctl_device_state_seconds > 900
+        for: 0m
+        labels: {severity: warn}
+        annotations:
+          summary: "{{ $labels.device }} on {{ $labels.instance }} has not been booted for 15m"
+          description: "Check `emuctl logs {{ $labels.device }}` and `emuctl doctor`."
+
+      - alert: EmuctlDeviceFlapping
+        # Restarts from crashes plus emuctl-initiated restarts.
+        expr: >
+          increase(emuctl_emulator_exits_total[1h])
+          + sum without (reason) (increase(emuctl_device_restarts_total{reason!="request"}[1h])) >= 3
+        labels: {severity: warn}
+        annotations:
+          summary: "{{ $labels.device }} restarted {{ $value | humanize }} times in the last hour"
+
+      - alert: EmuctlBootTimeouts
+        expr: increase(emuctl_emulator_boots_total{result="timeout"}[30m]) >= 2
+        labels: {severity: warn}
+        annotations:
+          summary: "{{ $labels.device }} timed out booting {{ $value | humanize }} times in 30m"
+          description: "Often host overload: see `emuctl doctor` sizing and host CPU."
+
+      - alert: EmuctlHealthInconclusive
+        # Checks keep timing out without proof the device is broken: usually
+        # a struggling host or adb, not one device.
+        expr: sum by (instance) (rate(emuctl_health_checks_total{result="unknown"}[15m])) > 0
+          and sum by (instance) (rate(emuctl_health_checks_total{result="unknown"}[15m]))
+            / sum by (instance) (rate(emuctl_health_checks_total[15m])) > 0.25
+        for: 15m
+        labels: {severity: warn}
+        annotations:
+          summary: "Over 25% of health checks on {{ $labels.instance }} are inconclusive"
+
+      - alert: EmuctlQueueBacklog
+        expr: emuctl_queue_oldest_wait_seconds > 900
+        for: 5m
+        labels: {severity: warn}
+        annotations:
+          summary: "A lease on {{ $labels.instance }} has waited {{ $value | humanizeDuration }}"
+          description: "All devices are busy or down. Add devices, or check for leases that are held but idle."
+
+      - alert: EmuctlReleaseCleanupFailing
+        expr: increase(emuctl_release_cleanup_failures_total[1h]) >= 3
+        labels: {severity: warn}
+        annotations:
+          summary: "Release cleanup failed {{ $value | humanize }} times on {{ $labels.device }} in 1h"
+          description: "Check release_packages and release_commands in the emuctl config."
+
+      - alert: EmuctlInstallFailures
+        expr: >
+          sum by (instance, device) (increase(emuctl_apk_installs_total{result="failed"}[1h]))
+          / sum by (instance, device) (increase(emuctl_apk_installs_total{result!="skipped"}[1h])) > 0.5
+        for: 10m
+        labels: {severity: warn}
+        annotations:
+          summary: "Most APK installs on {{ $labels.device }} fail"
+          description: "INSTALL_FAILED_UPDATE_INCOMPATIBLE usually means builders sign with different keystores."
+
+      - alert: EmuctlAPIErrors
+        expr: >
+          sum by (instance) (rate(emuctl_http_requests_total{code=~"5.."}[10m]))
+          / sum by (instance) (rate(emuctl_http_requests_total[10m])) > 0.05
+        for: 10m
+        labels: {severity: warn}
+        annotations:
+          summary: "Over 5% of emuctl API requests on {{ $labels.instance }} return 5xx"

@@ -34,9 +34,20 @@ import (
 //	POST   /v1/leases/{id}/shell {"command"} adb shell on the leased device
 //	GET    /v1/leases/{id}/screenshot        PNG of the screen
 //	GET    /v1/devices/{name}/logs           tail of the emulator log
+//	GET    /metrics                          Prometheus metrics (or on metrics_addr)
 //	POST   /v1/devices/{name}/restart        admin: force restart (ends lease)
 func (s *Service) serveAPI(ctx context.Context) error {
 	srv := &http.Server{Addr: s.Cfg.API, Handler: s.Handler(), ReadHeaderTimeout: 10 * time.Second}
+	if s.Cfg.MetricsAddr != "" && s.Cfg.MetricsAddr != s.Cfg.API {
+		msrv := &http.Server{Addr: s.Cfg.MetricsAddr, Handler: s.metricsMux(), ReadHeaderTimeout: 10 * time.Second}
+		go func() { <-ctx.Done(); msrv.Close() }()
+		go func() {
+			s.Log.Info("metrics listening", "addr", s.Cfg.MetricsAddr)
+			if err := msrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				s.Log.Error("metrics server", "err", err)
+			}
+		}()
+	}
 	go func() { <-ctx.Done(); srv.Close() }()
 	s.Log.Info("api listening", "addr", s.Cfg.API, "devices", s.Cfg.Names())
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -229,6 +240,7 @@ func (s *Service) Handler() http.Handler {
 			d.fwd.CloseAll()
 		}
 		wipe := r.URL.Query().Get("wipe") == "1"
+		s.Metrics.restarts.Inc(l.Device, "request")
 		go s.reset(d, wipe)
 		s.Log.Info("reset requested", "lease", l.ID, "user", user, "device", l.Device, "wipe", wipe)
 		return s.view(r, l), nil
@@ -302,6 +314,7 @@ func (s *Service) Handler() http.Handler {
 		if l, held := s.Leases.Holder(d.emu.Name); held && l.User != user {
 			return nil, fail(http.StatusConflict, "device is leased by %s", l.User)
 		}
+		s.Metrics.restarts.Inc(d.emu.Name, "request")
 		go s.reset(d, r.URL.Query().Get("wipe") == "1")
 		return map[string]string{"restarting": d.emu.Name}, nil
 	}))
@@ -311,7 +324,31 @@ func (s *Service) Handler() http.Handler {
 	mux.HandleFunc("PUT /v1/apks/{key}", s.wrap(func(w http.ResponseWriter, r *http.Request, user string) (any, error) {
 		return s.putAPK(r, user)
 	}))
+	if s.Cfg.MetricsAddr == "" || s.Cfg.MetricsAddr == s.Cfg.API {
+		// Same listener as the API: /metrics needs a token unless the API
+		// is open, like every other endpoint.
+		mux.Handle("GET /metrics", s.metricsAuth(s.Metrics.Handler()))
+	}
+	return s.Metrics.instrument(mux)
+}
+
+// metricsMux serves /metrics on a separate metrics_addr, without a token.
+func (s *Service) metricsMux() http.Handler {
+	mux := http.NewServeMux()
+	mux.Handle("GET /metrics", s.Metrics.Handler())
 	return mux
+}
+
+// metricsAuth requires an API token on the shared listener.
+func (s *Service) metricsAuth(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		token, _ := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+		if _, ok := s.Cfg.Authenticate(token); !ok && !s.Cfg.Open() {
+			http.Error(w, "missing or invalid token", http.StatusUnauthorized)
+			return
+		}
+		h.ServeHTTP(w, r)
+	})
 }
 
 const maxAPK = apkstore.MaxSize
@@ -347,7 +384,7 @@ func (s *Service) install(r *http.Request, l lease.Lease) (any, error) {
 	}
 	// The device no longer matches any stored key.
 	s.set(d, func(st *DeviceStatus) { st.APK = "" })
-	out, err := s.adbInstall(r.Context(), l, path)
+	out, err := s.adbInstall(r.Context(), l, path, "upload")
 	if err != nil {
 		return nil, err
 	}
@@ -370,10 +407,11 @@ func (s *Service) installStored(r *http.Request, l lease.Lease, key string) (any
 	d.mu.Unlock()
 	s.APKs.Touch(key)
 	if have == key && r.URL.Query().Get("force") != "1" {
+		s.Metrics.installs.Inc(l.Device, "store", "skipped")
 		return map[string]any{"installed": false, "apk": key, "output": "already installed"}, nil
 	}
 	s.set(d, func(st *DeviceStatus) { st.APK = "" })
-	out, err := s.adbInstall(r.Context(), l, path)
+	out, err := s.adbInstall(r.Context(), l, path, "store")
 	if err != nil {
 		return nil, err
 	}
@@ -382,7 +420,16 @@ func (s *Service) installStored(r *http.Request, l lease.Lease, key string) (any
 }
 
 // adbInstall runs `adb install -r -g` on the leased device. Tests replace it.
-func (s *Service) adbInstall(ctx context.Context, l lease.Lease, path string) (string, error) {
+func (s *Service) adbInstall(ctx context.Context, l lease.Lease, path, source string) (out string, err error) {
+	start := time.Now()
+	defer func() {
+		s.Metrics.installDuration.Observe(time.Since(start).Seconds(), l.Device, source)
+		result := "installed"
+		if err != nil {
+			result = "failed"
+		}
+		s.Metrics.installs.Inc(l.Device, source, result)
+	}()
 	if s.installFn != nil {
 		return s.installFn(ctx, l.Device, path)
 	}
@@ -392,17 +439,25 @@ func (s *Service) adbInstall(ctx context.Context, l lease.Lease, path string) (s
 	if err := d.emu.Connect(ctx); err != nil {
 		return "", fail(http.StatusServiceUnavailable, "device not reachable: %v", err)
 	}
-	out, err := d.emu.ADB(ctx, "install", "-r", "-g", path)
+	raw, err := d.emu.ADB(ctx, "install", "-r", "-g", path)
 	s.Log.Info("install", "lease", l.ID, "user", l.User, "device", l.Device, "apk", path, "err", err)
-	if err != nil || !strings.Contains(string(out), "Success") {
-		return "", fail(http.StatusUnprocessableEntity, "adb install failed: %v %s", err, strings.TrimSpace(string(out)))
+	if err != nil || !strings.Contains(string(raw), "Success") {
+		return "", fail(http.StatusUnprocessableEntity, "adb install failed: %v %s", err, strings.TrimSpace(string(raw)))
 	}
-	return strings.TrimSpace(string(out)), nil
+	return strings.TrimSpace(string(raw)), nil
 }
 
 func (s *Service) putAPK(r *http.Request, user string) (any, error) {
 	key := r.PathValue("key")
 	n, err := s.APKs.Put(key, r.Body)
+	result := "stored"
+	switch {
+	case errors.Is(err, apkstore.ErrExists):
+		result = "exists"
+	case err != nil:
+		result = "rejected"
+	}
+	s.Metrics.apkUploads.Inc(result)
 	switch {
 	case errors.Is(err, apkstore.ErrBadKey):
 		return nil, fail(http.StatusBadRequest, "%v", err)

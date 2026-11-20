@@ -43,11 +43,18 @@ func (s *Service) booted(d *device) bool {
 func (s *Service) onEnd(l lease.Lease) {
 	s.Log.Info("lease ended", "lease", l.ID, "user", l.User, "device", l.Device, "state", l.State)
 	d := s.devs[l.Device]
+	start := time.Now()
+	defer func() { s.Metrics.release.Observe(time.Since(start).Seconds(), l.Device) }()
 	defer s.Leases.Done(l.Device)
+	s.Metrics.leasesEnded.Inc(l.Device, string(l.State))
+	if !l.Granted.IsZero() {
+		s.Metrics.leaseDuration.Observe(time.Since(l.Granted).Seconds(), l.Device, string(l.State))
+	}
 	if d.fwd != nil {
 		d.fwd.CloseAll()
 	}
 	if s.Cfg.Release == config.ReleaseWipe {
+		s.Metrics.restarts.Inc(l.Device, "wipe")
 		s.reset(d, true) // busy until it boots again
 		return
 	}
@@ -57,7 +64,8 @@ func (s *Service) onEnd(l lease.Lease) {
 	log := s.Log.With("device", l.Device)
 	if err := s.releaseClean(d); err != nil {
 		log.Warn("release cleanup failed, restarting", "err", err)
-		s.markBroken(d, err)
+		s.Metrics.releaseFails.Inc(l.Device)
+		s.markBroken(d, "cleanup", err)
 		return
 	}
 	s.healthGate(d, log, "release")
@@ -101,16 +109,17 @@ func (s *Service) healthGate(d *device, log *slog.Logger, why string) emulator.H
 	ctx, cancel := context.WithTimeout(s.baseCtx(), 30*time.Second)
 	defer cancel()
 	h, err := s.ops(d).Check(ctx)
+	s.Metrics.healthChecks.Inc(d.emu.Name, why, h.String())
 	switch h {
 	case emulator.Broken:
 		log.Warn("health check: broken, restarting", "check", why, "err", err)
-		s.markBroken(d, err)
+		s.markBroken(d, "broken", err)
 	case emulator.Unknown:
 		n := 0
 		s.set(d, func(st *DeviceStatus) { st.Unverified++; n = st.Unverified })
 		if n >= maxUnverified {
 			log.Warn("health check: inconclusive too many times in a row, restarting", "check", why, "count", n, "err", err)
-			s.markBroken(d, fmt.Errorf("%d inconclusive health checks in a row: %v", n, err))
+			s.markBroken(d, "unverified", fmt.Errorf("%d inconclusive health checks in a row: %v", n, err))
 			return emulator.Broken
 		}
 		log.Warn("health check: inconclusive, keeping device", "check", why, "count", n, "err", err)
@@ -120,7 +129,8 @@ func (s *Service) healthGate(d *device, log *slog.Logger, why string) emulator.H
 	return h
 }
 
-func (s *Service) markBroken(d *device, err error) {
+func (s *Service) markBroken(d *device, reason string, err error) {
+	s.Metrics.restarts.Inc(d.emu.Name, reason)
 	s.set(d, func(st *DeviceStatus) {
 		st.Restarts++
 		st.Unverified = 0

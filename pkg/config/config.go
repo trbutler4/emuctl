@@ -94,6 +94,10 @@ type Config struct {
 	Listen string `json:"listen,omitempty"`
 	// HTTP API address. Default 127.0.0.1:7600.
 	API string `json:"api,omitempty"`
+	// Prometheus /metrics address. Empty (default) serves /metrics on the API
+	// listener, behind the same token. A separate address serves it without a
+	// token, so bind it to loopback or a monitoring network.
+	MetricsAddr string `json:"metrics_addr,omitempty"`
 	// Lease lifetime without a heartbeat, e.g. "2m". Default 2m. Clients may
 	// ask for a longer per-lease TTL up to max_lease_ttl (default 4h).
 	LeaseTTL    string `json:"lease_ttl,omitempty"`

@@ -54,9 +54,12 @@ type Service struct {
 	Cfg    *config.Config
 	Log    *slog.Logger
 	Leases *lease.Manager
-	APKs   *apkstore.Store
-	devs   map[string]*device
-	ctx    context.Context
+	// Metrics serves /metrics. Version labels emuctl_build_info.
+	Metrics *Metrics
+	Version string
+	APKs    *apkstore.Store
+	devs    map[string]*device
+	ctx     context.Context
 
 	// Test hooks: replace adb install and the release/health adb operations.
 	installFn func(ctx context.Context, device, path string) (string, error)
@@ -65,7 +68,8 @@ type Service struct {
 
 func New(c *config.Config, log *slog.Logger) (*Service, error) {
 	s := &Service{Cfg: c, Log: log, devs: map[string]*device{},
-		APKs: &apkstore.Store{Dir: filepath.Join(c.StateDir, "apks")}}
+		APKs: &apkstore.Store{Dir: filepath.Join(c.StateDir, "apks")}, Version: "dev"}
+	s.Metrics = newMetrics(s)
 	s.Leases = lease.NewManager(c.Names(), c.TTL())
 	s.Leases.Hooks = lease.Hooks{Granted: s.onGrant, Ended: s.onEnd}
 	s.Leases.HoldOnEnd = true
@@ -103,6 +107,8 @@ func sameIP(a, b string) bool {
 
 func (s *Service) onGrant(l lease.Lease) {
 	s.Log.Info("lease granted", "lease", l.ID, "user", l.User, "device", l.Device, "client", l.ClientIP)
+	s.Metrics.leasesGranted.Inc(l.Device)
+	s.Metrics.queueWait.Observe(l.Granted.Sub(l.Queued).Seconds(), l.Device)
 }
 
 // Run starts every device, the forwarders and the lease sweeper, then
@@ -216,6 +222,7 @@ func (s *Service) supervise(ctx context.Context, d *device) {
 			return
 		}
 		log.Warn("emulator exited", "err", err)
+		s.Metrics.exits.Inc(d.emu.Name)
 		s.set(d, func(st *DeviceStatus) {
 			st.State, st.Since, st.Restarts = "crashed", time.Now(), st.Restarts+1
 			if err != nil {
@@ -238,6 +245,7 @@ func (s *Service) runOnce(ctx context.Context, d *device, log *slog.Logger) erro
 	if n, err := d.emu.ReapStale(ctx); err != nil {
 		return err
 	} else if n > 0 {
+		s.Metrics.reaped.Add(float64(n), d.emu.Name)
 		log.Warn("stopped emulator processes left running by an earlier emuctl", "count", n)
 	}
 	if err := d.emu.Create(ctx); err != nil {
@@ -258,6 +266,7 @@ func (s *Service) runOnce(ctx context.Context, d *device, log *slog.Logger) erro
 		return err
 	}
 	log.Info("emulator started", "pid", cmd.Process.Pid, "serial", d.emu.Serial())
+	started := time.Now()
 	s.set(d, func(st *DeviceStatus) {
 		if st.State != "resetting" {
 			st.State = "starting"
@@ -278,10 +287,13 @@ func (s *Service) runOnce(ctx context.Context, d *device, log *slog.Logger) erro
 			booted = nil
 			if err != nil {
 				log.Error("boot timeout, killing", "err", err)
+				s.Metrics.boots.Inc(d.emu.Name, "timeout")
 				cmd.Process.Kill()
 				continue
 			}
 			log.Info("booted")
+			s.Metrics.boots.Inc(d.emu.Name, "ok")
+			s.Metrics.bootDuration.Observe(time.Since(started).Seconds(), d.emu.Name)
 			s.prepare(ctx, d, log)
 			s.set(d, func(st *DeviceStatus) { st.State, st.Since, st.Checked = "booted", time.Now(), time.Now() })
 			s.Leases.SetBusy(d.emu.Name, false)

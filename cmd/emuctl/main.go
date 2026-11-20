@@ -218,6 +218,7 @@ func serve(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	s.Version = version
 	return s.Run(ctx)
 }
 
