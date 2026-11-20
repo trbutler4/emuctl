@@ -20,6 +20,9 @@ type deviceOps interface {
 	Shell(ctx context.Context, command string) ([]byte, int, error)
 }
 
+// maxUnverified inconclusive health checks in a row restart a device.
+const maxUnverified = 3
+
 func (s *Service) ops(d *device) deviceOps {
 	if s.opsFn != nil {
 		return s.opsFn(d.emu.Name)
@@ -89,9 +92,11 @@ func (s *Service) releaseClean(d *device) error {
 }
 
 // healthGate checks a device that is out of the pool. Broken devices are
-// restarted. Unknown results leave the device in service: a failed check is
-// not evidence of a failed device, and restarting a healthy one on a slow
-// adb call would cost a full boot.
+// restarted. A single inconclusive result leaves the device in service: one
+// slow adb call is not evidence of a failed device, and restarting a healthy
+// one costs a full boot. maxUnverified inconclusive checks in a row are
+// treated as broken, since a hung emulator still accepts TCP connections and
+// would otherwise stay in the pool forever.
 func (s *Service) healthGate(d *device, log *slog.Logger, why string) emulator.Health {
 	ctx, cancel := context.WithTimeout(s.baseCtx(), 30*time.Second)
 	defer cancel()
@@ -101,8 +106,14 @@ func (s *Service) healthGate(d *device, log *slog.Logger, why string) emulator.H
 		log.Warn("health check: broken, restarting", "check", why, "err", err)
 		s.markBroken(d, err)
 	case emulator.Unknown:
-		log.Warn("health check: inconclusive, keeping device", "check", why, "err", err)
-		s.set(d, func(st *DeviceStatus) { st.Unverified++ })
+		n := 0
+		s.set(d, func(st *DeviceStatus) { st.Unverified++; n = st.Unverified })
+		if n >= maxUnverified {
+			log.Warn("health check: inconclusive too many times in a row, restarting", "check", why, "count", n, "err", err)
+			s.markBroken(d, fmt.Errorf("%d inconclusive health checks in a row: %v", n, err))
+			return emulator.Broken
+		}
+		log.Warn("health check: inconclusive, keeping device", "check", why, "count", n, "err", err)
 	default:
 		s.set(d, func(st *DeviceStatus) { st.Checked, st.Unverified = time.Now(), 0 })
 	}
@@ -112,6 +123,7 @@ func (s *Service) healthGate(d *device, log *slog.Logger, why string) emulator.H
 func (s *Service) markBroken(d *device, err error) {
 	s.set(d, func(st *DeviceStatus) {
 		st.Restarts++
+		st.Unverified = 0
 		if err != nil {
 			st.LastErr = err.Error()
 		}

@@ -102,6 +102,28 @@ func TestUnknownHealthKeepsDevice(t *testing.T) {
 	}
 }
 
+func TestRepeatedUnknownRestarts(t *testing.T) {
+	s, f := lifecycleService(t, "")
+	f.health = emulator.Unknown
+	s.ctx = context.Background()
+	d := s.devs["p1"]
+	for i := 1; i < maxUnverified; i++ {
+		s.healthGate(d, s.Log, "idle")
+		if st := s.Devices()[0]; st.Restarts != 0 || st.Unverified != i {
+			t.Fatalf("check %d: %+v", i, st)
+		}
+	}
+	if h := s.healthGate(d, s.Log, "idle"); h != emulator.Broken {
+		t.Fatalf("check %d: %v, want broken", maxUnverified, h)
+	}
+	if st := s.Devices()[0]; st.Restarts < 1 {
+		t.Fatalf("hung device must be restarted: %+v", st)
+	}
+	d.ctl.Lock()
+	s.halt(d)
+	d.ctl.Unlock()
+}
+
 func TestBrokenHealthRestarts(t *testing.T) {
 	s, f := lifecycleService(t, "")
 	f.health = emulator.Broken
