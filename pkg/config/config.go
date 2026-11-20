@@ -74,6 +74,9 @@ type Device struct {
 	// Use an existing AVD instead of creating emuctl-NAME under state_dir.
 	AVDHome string `json:"avd_home,omitempty"`
 	AVDName string `json:"avd_name,omitempty"`
+	// PIN of the AVD's screen lock, if it has one. emuctl enters it after
+	// boot because apps are hidden until the user's storage is unlocked.
+	UnlockPIN string `json:"unlock_pin,omitempty"`
 	// Extra emulator flags, appended verbatim.
 	ExtraArgs []string `json:"extra_args,omitempty"`
 }

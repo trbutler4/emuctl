@@ -210,11 +210,35 @@ func (e *Emulator) Booted(ctx context.Context) bool {
 	return err == nil && strings.TrimSpace(string(out)) == "1"
 }
 
-// WaitBooted polls until boot completes or ctx expires.
+// Unlocked reports whether user 0's credential-encrypted storage is unlocked.
+// Until it is, Android hides every app that is not direct-boot aware, so
+// launcher resolution fails with "No activity found".
+func (e *Emulator) Unlocked(ctx context.Context) bool {
+	out, err := e.ADB(ctx, "shell", "dumpsys", "user")
+	return err == nil && strings.Contains(string(out), "0=RUNNING_UNLOCKED")
+}
+
+// Unlock wakes the screen, dismisses the keyguard and enters the device PIN
+// when one is configured.
+func (e *Emulator) Unlock(ctx context.Context) {
+	e.ADB(ctx, "shell", "input", "keyevent", "KEYCODE_WAKEUP")
+	e.ADB(ctx, "shell", "wm", "dismiss-keyguard")
+	if e.Dev.UnlockPIN != "" {
+		time.Sleep(time.Second)
+		e.ADB(ctx, "shell", "input", "text", e.Dev.UnlockPIN)
+		e.ADB(ctx, "shell", "input", "keyevent", "KEYCODE_ENTER")
+	}
+}
+
+// WaitBooted polls until boot completes and the user is unlocked, or ctx expires.
 func (e *Emulator) WaitBooted(ctx context.Context) error {
 	for {
-		c, cancel := context.WithTimeout(ctx, 10*time.Second)
+		c, cancel := context.WithTimeout(ctx, 20*time.Second)
 		ok := e.Booted(c)
+		if ok && !e.Unlocked(c) {
+			e.Unlock(c)
+			ok = e.Unlocked(c)
+		}
 		cancel()
 		if ok {
 			return nil
