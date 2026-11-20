@@ -215,8 +215,14 @@ func (s *Server) acquire(ctx context.Context, a map[string]any) (any, error) {
 	deadline := time.Now().Add(wait)
 	for {
 		if l.State == "active" && l.Ready {
+			if l.ADB == "" {
+				return map[string]any{"lease": l, "next": "Use emulator_shell, emulator_screenshot and emulator_install with this lease_id. Release with emulator_release when done."}, nil
+			}
+			if ll, err := s.C.LocalADB(ctx, l); err == nil {
+				l = ll
+			}
 			return map[string]any{"lease": l, "next": fmt.Sprintf(
-				"adb connect %s, then use serial %s (maestro --device %s). Release with emulator_release when done.", l.ADB, l.Serial, l.Serial)}, nil
+				"Use emulator_shell, emulator_screenshot and emulator_install with this lease_id. With local adb/Maestro: adb connect %s, then serial %s (maestro --device %s). Release with emulator_release when done.", l.ADB, l.Serial, l.Serial)}, nil
 		}
 		if l.State != "queued" && l.State != "active" {
 			s.stopHeartbeat(l.ID)

@@ -22,10 +22,16 @@ type Client struct {
 	Base  string
 	Token string
 	HTTP  *http.Client
+
+	ssh *sshTarget // set for EMUCTL_URL=ssh://...
+	tun tunnels
+	err error // bad EMUCTL_URL
 }
 
 // FromEnv uses EMUCTL_URL (default http://127.0.0.1:7600) and the token from
 // EMUCTL_TOKEN, else the file EMUCTL_TOKEN_FILE, else ~/.config/emuctl/token.
+// EMUCTL_URL may be ssh://[user@]host[:port][/api-host:port] to reach a server
+// that only listens on loopback through SSH (default API 127.0.0.1:7600).
 func FromEnv() *Client {
 	base := os.Getenv("EMUCTL_URL")
 	if base == "" {
@@ -41,8 +47,17 @@ func FromEnv() *Client {
 			token = strings.TrimSpace(string(b))
 		}
 	}
-	return &Client{Base: strings.TrimRight(base, "/"), Token: token,
+	c := &Client{Base: strings.TrimRight(base, "/"), Token: token,
 		HTTP: &http.Client{Timeout: 10 * time.Minute}}
+	if strings.HasPrefix(base, "ssh://") {
+		t, err := parseSSH(base)
+		if err != nil {
+			c.err = err
+		} else {
+			c.ssh = t
+		}
+	}
+	return c
 }
 
 type Lease struct {
@@ -73,7 +88,16 @@ type Device struct {
 }
 
 func (c *Client) Do(ctx context.Context, method, path string, body io.Reader, out any) error {
-	req, err := http.NewRequestWithContext(ctx, method, c.Base+path, body)
+	if c.err != nil {
+		return c.err
+	}
+	if err := c.ensureAPI(ctx); err != nil {
+		return err
+	}
+	c.tun.mu.Lock()
+	base := c.Base
+	c.tun.mu.Unlock()
+	req, err := http.NewRequestWithContext(ctx, method, base+path, body)
 	if err != nil {
 		return err
 	}

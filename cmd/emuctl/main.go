@@ -151,7 +151,9 @@ func main() {
 	case "version", "-version", "--version":
 		fmt.Println("emuctl", version)
 	case "mcp":
-		err = mcp.New(client.FromEnv(), version).Serve(ctx, os.Stdin, os.Stdout)
+		c := client.FromEnv()
+		err = mcp.New(c, version).Serve(ctx, os.Stdin, os.Stdout)
+		c.Close()
 	case "help", "-h", "--help":
 		fmt.Print(usage)
 	default:
@@ -351,6 +353,7 @@ func run(ctx context.Context, args []string) (int, error) {
 		}
 	}
 	c := client.FromEnv()
+	defer c.Close()
 	l, err := c.Acquire(ctx, *device, *note, progress)
 	if err != nil {
 		return 1, err
@@ -386,6 +389,9 @@ func run(ctx context.Context, args []string) (int, error) {
 	}
 	if l.ADB == "" {
 		return 1, fmt.Errorf("device %s has no expose_port, adb is not reachable remotely", l.Device)
+	}
+	if l, err = c.LocalADB(ctx, l); err != nil {
+		return 1, err
 	}
 	if err := adbConnect(ctx, l.ADB); err != nil {
 		return 1, err
@@ -428,8 +434,13 @@ func acquire(ctx context.Context, args []string) error {
 	note := fs.String("note", "", "note shown to other users")
 	fs.Parse(args)
 	c := client.FromEnv()
+	defer c.Close()
 	l, err := c.Acquire(ctx, *device, *note, progress)
 	if err != nil {
+		return err
+	}
+	if l, err = c.LocalADB(ctx, l); err != nil {
+		c.Release(context.Background(), l.ID)
 		return err
 	}
 	json.NewEncoder(os.Stdout).Encode(l)

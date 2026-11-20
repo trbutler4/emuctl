@@ -179,7 +179,8 @@ hash separately, for configs managed elsewhere (e.g. Nix).
 Security notes:
 
 - The API uses bearer tokens over plain HTTP. Run it on a trusted network or
-  VPN (Tailscale, WireGuard), or put a TLS reverse proxy in front.
+  VPN (Tailscale, WireGuard), put a TLS reverse proxy in front, or use SSH
+  (below).
 - The adb forwarders (`expose_port`) aren't authenticated by token. They admit
   only the current lease holder's IP. On a shared network, firewall those ports
   so only your clients can reach them. Leave `expose_port` unset if clients
@@ -187,6 +188,30 @@ Security notes:
 - Anyone holding a lease has full control of that emulator, including
   `adb shell`. Treat emulators as disposable and use `reset_on_release` when
   sharing them.
+
+## Over SSH (no open ports)
+
+If clients can already SSH to the emulator host, nothing else needs to be
+exposed. Keep `api` and `listen` on loopback (the defaults), add users, and
+point clients at an `ssh://` URL:
+
+```bash
+export EMUCTL_URL=ssh://me@emu-host          # or ssh://emu-host:2222/127.0.0.1:7600
+emuctl devices
+emuctl run -- sh -c 'maestro --device "$EMUCTL_SERIAL" test flows/'
+```
+
+The client runs `ssh -L` itself: one forward for the API, opened on first
+use, and one per leased device's adb port, opened when needed. `run`,
+`acquire` and `emulator_acquire` return the local end of that forward as the
+serial. Tunnels close when the command or MCP server exits. emuctl uses your
+`ssh` binary, so `~/.ssh/config`, agents and keys all work. Auth must be
+non-interactive (keys or an agent).
+
+Through a tunnel every connection reaches the server from loopback, so the
+holder-only check on adb ports can't tell SSH users apart. Anyone who can SSH
+to the host can already reach its loopback ports. Tokens still separate users
+and leases.
 
 ## Running as a service
 
