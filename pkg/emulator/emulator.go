@@ -5,6 +5,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -59,6 +60,9 @@ func (e *Emulator) Exists() bool {
 
 // Create makes the AVD if it does not exist yet. It never overwrites one.
 func (e *Emulator) Create(ctx context.Context) error {
+	if err := e.runGuard(); err != nil {
+		return err
+	}
 	if err := os.MkdirAll(e.Cfg.AVDHome(e.Name), 0o700); err != nil {
 		return err
 	}
@@ -141,8 +145,21 @@ func (e *Emulator) Args() []string {
 	return append(args, e.Dev.ExtraArgs...)
 }
 
+func (e *Emulator) runGuard() error {
+	for _, p := range []int{e.Dev.ConsolePort, e.ADBPort()} {
+		if c, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", p), time.Second); err == nil {
+			c.Close()
+			return fmt.Errorf("port %d already in use: another emulator is running for %s, refusing to start a second one on the same AVD", p, e.Name)
+		}
+	}
+	return nil
+}
+
 // Command builds the emulator process, logging to the device log file.
 func (e *Emulator) Command(ctx context.Context) (*exec.Cmd, *os.File, error) {
+	if err := e.runGuard(); err != nil {
+		return nil, nil, err
+	}
 	if err := os.MkdirAll(e.Cfg.DeviceDir(e.Name), 0o700); err != nil {
 		return nil, nil, err
 	}
