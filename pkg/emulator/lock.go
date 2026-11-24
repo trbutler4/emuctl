@@ -263,6 +263,23 @@ func (e *Emulator) KeepAwake(ctx context.Context) error {
 
 var enrollStepRE = regexp.MustCompile(`(?i)^(more|i agree|agree|start|next|continue)$`)
 
+// EnsurePIN sets unlock_pin as the screen lock when the device has none. Apps
+// that lock with the device credential cannot be unlocked on a device without
+// one: they stay on their own locked screen.
+func (e *Emulator) EnsurePIN(ctx context.Context) error {
+	if e.Dev.UnlockPIN == "" {
+		return nil
+	}
+	has, err := e.HasPIN(ctx)
+	if err != nil || has {
+		return err
+	}
+	if out, err := e.ADB(ctx, "shell", "locksettings", "set-pin", e.Dev.UnlockPIN); err != nil {
+		return fmt.Errorf("locksettings set-pin: %v %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
 // EnsureFingerprint sets the device PIN when the device has no screen lock and
 // enrolls finger FingerID, so apps' fingerprint prompts can be passed with
 // FingerTouch. It does nothing when a fingerprint is already enrolled.
@@ -273,14 +290,8 @@ func (e *Emulator) EnsureFingerprint(ctx context.Context) error {
 	if e.Fingerprints(ctx) > 0 {
 		return nil
 	}
-	has, err := e.HasPIN(ctx)
-	if err != nil {
+	if err := e.EnsurePIN(ctx); err != nil {
 		return err
-	}
-	if !has {
-		if out, err := e.ADB(ctx, "shell", "locksettings", "set-pin", e.Dev.UnlockPIN); err != nil {
-			return fmt.Errorf("locksettings set-pin: %v %s", err, strings.TrimSpace(string(out)))
-		}
 	}
 	defer func() {
 		bg := context.WithoutCancel(ctx)

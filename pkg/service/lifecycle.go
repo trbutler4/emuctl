@@ -19,6 +19,7 @@ type deviceOps interface {
 	DisableAnimations(ctx context.Context) error
 	Shell(ctx context.Context, command string) ([]byte, int, error)
 	KeepAwake(ctx context.Context) error
+	EnsurePIN(ctx context.Context) error
 	EnsureFingerprint(ctx context.Context) error
 }
 
@@ -178,6 +179,9 @@ func (s *Service) prepare(ctx context.Context, d *device, log *slog.Logger) {
 	// A screen that sleeps brings the lock screen back mid-lease.
 	if err := o.KeepAwake(short); err != nil {
 		log.Warn("keep awake", "err", err)
+	}
+	if err := o.EnsurePIN(short); err != nil {
+		log.Warn("set unlock_pin as the screen lock", "err", err)
 	}
 	if s.Cfg.Devices[d.emu.Name].Fingerprint {
 		long, cancel := context.WithTimeout(ctx, 3*time.Minute)

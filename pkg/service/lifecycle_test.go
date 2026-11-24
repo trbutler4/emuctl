@@ -39,6 +39,7 @@ func (f *fakeOps) ClearPackages(ctx context.Context, pkgs []string) error {
 }
 func (f *fakeOps) DisableAnimations(ctx context.Context) error { f.log("anim"); return nil }
 func (f *fakeOps) KeepAwake(ctx context.Context) error         { f.log("awake"); return nil }
+func (f *fakeOps) EnsurePIN(ctx context.Context) error         { f.log("pin"); return nil }
 func (f *fakeOps) EnsureFingerprint(ctx context.Context) error { f.log("finger"); return nil }
 func (f *fakeOps) Shell(ctx context.Context, c string) ([]byte, int, error) {
 	f.log("sh:" + c)
@@ -186,7 +187,7 @@ func TestIdleHealthLoop(t *testing.T) {
 func TestPrepareKeepsAwakeAndEnrollsFingerprint(t *testing.T) {
 	s, f := lifecycleService(t, "")
 	s.prepare(context.Background(), s.devs["p1"], s.Log)
-	if got, want := f.got(), "anim,awake"; got != want {
+	if got, want := f.got(), "anim,awake,pin"; got != want {
 		t.Fatalf("prepare without fingerprint: %s, want %s", got, want)
 	}
 
@@ -202,7 +203,7 @@ func TestPrepareKeepsAwakeAndEnrollsFingerprint(t *testing.T) {
 	f2 := &fakeOps{}
 	s2.opsFn = func(string) deviceOps { return f2 }
 	s2.prepare(context.Background(), s2.devs["p1"], s2.Log)
-	if got, want := f2.got(), "anim,awake,finger"; got != want {
+	if got, want := f2.got(), "anim,awake,pin,finger"; got != want {
 		t.Fatalf("prepare with fingerprint: %s, want %s", got, want)
 	}
 }
