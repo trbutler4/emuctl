@@ -37,8 +37,26 @@ clients use `EMUCTL_URL=ssh://host`.
 
 Device fields: `profile`, `image`, `console_port` (even, 5554–5682),
 `expose_port`, `ram_mb`, `cores`, `gpu`, `width`, `height`, `density`,
-`avd_home`/`avd_name` (use an existing AVD), `unlock_pin`, `window`,
-`extra_args`.
+`avd_home`/`avd_name` (use an existing AVD), `unlock_pin`, `fingerprint`,
+`window`, `extra_args`.
+
+## Locked apps and black screenshots
+
+Apps that lock themselves with the device credential (expo-local-authentication,
+androidx.biometric) show a system prompt on every cold start. It is a secure
+window, so `adb screencap` returns it as a black frame with only the status bar.
+
+- `unlock_pin` is the device PIN. emuctl enters it after boot and when
+  `POST /v1/leases/{id}/unlock` finds a PIN entry.
+- `"fingerprint": true` (needs `unlock_pin`) sets the PIN if the device has no
+  screen lock and enrolls finger 1 after boot, through the Settings wizard and
+  the emulator console. `unlock` then passes fingerprint prompts with a sensor
+  touch instead of typing the PIN. Enrollment survives restarts (it is in user
+  data); a `wipe` release re-enrolls on the next boot.
+- emuctl keeps the screen on (`stay_on_while_plugged_in`) after every boot, so
+  the lock screen does not come back mid-lease.
+- `GET /v1/leases/{id}/screenshot?source=host` reads the emulator display through
+  the console and shows the prompt that adb blanks.
 
 ## Between leases
 

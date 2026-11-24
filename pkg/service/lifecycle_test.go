@@ -38,6 +38,8 @@ func (f *fakeOps) ClearPackages(ctx context.Context, pkgs []string) error {
 	return f.clearErr
 }
 func (f *fakeOps) DisableAnimations(ctx context.Context) error { f.log("anim"); return nil }
+func (f *fakeOps) KeepAwake(ctx context.Context) error         { f.log("awake"); return nil }
+func (f *fakeOps) EnsureFingerprint(ctx context.Context) error { f.log("finger"); return nil }
 func (f *fakeOps) Shell(ctx context.Context, c string) ([]byte, int, error) {
 	f.log("sh:" + c)
 	return nil, 0, nil
@@ -178,5 +180,29 @@ func TestIdleHealthLoop(t *testing.T) {
 	if l, _ := s.Leases.Request("u", "", "", ""); l.State != lease.Active {
 		// The loop may be mid-check; it releases right after.
 		waitState(t, s.Leases, l.ID, lease.Active)
+	}
+}
+
+func TestPrepareKeepsAwakeAndEnrollsFingerprint(t *testing.T) {
+	s, f := lifecycleService(t, "")
+	s.prepare(context.Background(), s.devs["p1"], s.Log)
+	if got, want := f.got(), "anim,awake"; got != want {
+		t.Fatalf("prepare without fingerprint: %s, want %s", got, want)
+	}
+
+	cfg, err := config.Parse([]byte(`{"sdk":"/nonexistent","state_dir":"` + t.TempDir() + `",
+	  "devices":{"p1":{"unlock_pin":"1234","fingerprint":true}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s2, err := New(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	f2 := &fakeOps{}
+	s2.opsFn = func(string) deviceOps { return f2 }
+	s2.prepare(context.Background(), s2.devs["p1"], s2.Log)
+	if got, want := f2.got(), "anim,awake,finger"; got != want {
+		t.Fatalf("prepare with fingerprint: %s, want %s", got, want)
 	}
 }

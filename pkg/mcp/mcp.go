@@ -26,6 +26,9 @@ Workflow:
      emulator_shell runs "adb shell" commands (am start, pm list packages, input tap X Y, input text, uiautomator dump /dev/tty, getprop).
      emulator_screenshot returns the current screen as an image.
      emulator_install installs an APK from this machine.
+   A black screen with only the status bar is usually a lock prompt: apps that lock with the device credential show a
+   system prompt that adb screenshots blank. emulator_unlock gets past it (fingerprint, else the device PIN), and
+   emulator_screenshot with source=host shows what is really on screen.
    With adb or Maestro installed locally you can also drive the returned "adb" target directly:
      adb connect <adb>, then adb -s <adb> ..., or maestro --device <adb> test flow.yaml
    Only the machine that acquired the lease can connect. Other clients are refused.
@@ -123,10 +126,15 @@ func New(c *client.Client, version string) *Server {
 			func(ctx context.Context, a map[string]any) (any, error) {
 				return s.C.Shell(ctx, sarg(a, "lease_id"), sarg(a, "command"))
 			}},
-		{"emulator_screenshot", "Screenshot of your leased device, returned as a PNG image. Pass save_path to also write it to a file on this machine.",
-			obj(map[string]any{"lease_id": str("lease id"), "save_path": str("optional local file path for the PNG")}, "lease_id"),
+		{"emulator_screenshot", "Screenshot of your leased device, returned as a PNG image. Pass save_path to also write it to a file on this machine. source=host captures the emulator display from outside Android, which shows lock and PIN prompts that the default adb capture returns black.",
+			obj(map[string]any{"lease_id": str("lease id"), "save_path": str("optional local file path for the PNG"),
+				"source": str("adb (default) or host")}, "lease_id"),
 			func(ctx context.Context, a map[string]any) (any, error) {
-				png, err := s.C.Screenshot(ctx, sarg(a, "lease_id"))
+				shot := s.C.Screenshot
+				if sarg(a, "source") == "host" {
+					shot = s.C.HostScreenshot
+				}
+				png, err := shot(ctx, sarg(a, "lease_id"))
 				if err != nil {
 					return nil, err
 				}
@@ -136,6 +144,18 @@ func New(c *client.Client, version string) *Server {
 					}
 				}
 				return image{png}, nil
+			}},
+		{"emulator_unlock", "Get your leased device past the lock screen and any app credential prompt (system 'Unlock ...' / BiometricPrompt): touches the enrolled fingerprint, else enters the device PIN. Safe to call when nothing is locked.",
+			obj(map[string]any{"lease_id": str("lease id")}, "lease_id"),
+			func(ctx context.Context, a map[string]any) (any, error) { return s.C.Unlock(ctx, sarg(a, "lease_id")) }},
+		{"emulator_finger", "Touch the emulator's fingerprint sensor (finger 1 is the one emuctl enrolls).",
+			obj(map[string]any{"lease_id": str("lease id"), "finger": num("finger id, default 1")}, "lease_id"),
+			func(ctx context.Context, a map[string]any) (any, error) {
+				f := 1
+				if v, ok := a["finger"].(float64); ok {
+					f = int(v)
+				}
+				return map[string]int{"touched": f}, s.C.Finger(ctx, sarg(a, "lease_id"), f)
 			}},
 		{"emulator_reset", "Reboot your leased device, wiping all data when wipe=true. Blocks until ready.",
 			obj(map[string]any{"lease_id": str("lease id"), "wipe": boolean("wipe user data")}, "lease_id"),

@@ -80,7 +80,9 @@ anywhere. `emuctl run` also needs `adb` on PATH.
 | `emulator_acquire` | queue for a device, blocks until ready or `wait_seconds` |
 | `emulator_status` | state of a lease |
 | `emulator_shell` | `adb shell` command, returns output and exit code |
-| `emulator_screenshot` | PNG of the screen as MCP image content, optionally saved to a file |
+| `emulator_screenshot` | PNG of the screen as MCP image content, optionally saved to a file; `source: host` shows lock prompts adb returns black |
+| `emulator_unlock` | pass the lock screen and app credential prompts (fingerprint, else PIN) |
+| `emulator_finger` | touch the virtual fingerprint sensor |
 | `emulator_install` | install a local APK |
 | `emulator_reset` | reboot, optionally wiping data, waits until ready |
 | `emulator_release` | release the lease |
@@ -108,6 +110,7 @@ emuctl run -reset -device pixel-1 -- ./e2e.sh
 emuctl acquire -note "manual QA"                   # hold until Ctrl-C, prints lease JSON
 emuctl shell LEASE pm list packages
 emuctl screenshot LEASE screen.png
+emuctl unlock LEASE                    # black screenshot? usually a lock prompt
 ```
 
 `run` exports `ANDROID_SERIAL`, `EMUCTL_SERIAL` (the `adb connect` target),
@@ -179,7 +182,8 @@ Device fields:
 | `window` | `false` | show the emulator window instead of running headless |
 | `console_port` | 5600 + 2n | even, so device ports never collide with other emulators |
 | `avd_home`, `avd_name` | per-device AVD in `state_dir` | use an existing AVD instead |
-| `unlock_pin` | none | PIN entered after boot if the AVD has a screen lock |
+| `unlock_pin` | none | device PIN: entered after boot if the AVD has a screen lock, and by `unlock` at PIN prompts |
+| `fingerprint` | `false` | enroll finger 1 after boot (sets `unlock_pin` as the screen lock if there is none), so `unlock` passes app fingerprint prompts |
 | `extra_args` | none | appended to the emulator command line |
 
 emuctl creates each device's AVD under `state_dir` (default
@@ -367,7 +371,9 @@ Bearer token auth (none in open mode), JSON.
 | POST | `/v1/leases/{id}/install` | body is the APK |
 | POST | `/v1/leases/{id}/reset?wipe=1` | reboot, optionally wipe |
 | POST | `/v1/leases/{id}/shell` `{"command"}` | `adb shell`, returns `{"output","exit_code"}` |
-| GET | `/v1/leases/{id}/screenshot` | `image/png` |
+| GET | `/v1/leases/{id}/screenshot?source=host` | `image/png`; `source=host` captures the emulator display |
+| POST | `/v1/leases/{id}/unlock` | pass lock screen and app credential prompts |
+| POST | `/v1/leases/{id}/finger?id=1` | touch the fingerprint sensor |
 | GET | `/v1/devices/{name}/logs` | emulator log tail |
 | POST | `/v1/devices/{name}/restart` | restart a device you hold or nobody holds |
 

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/trbutler4/emuctl/pkg/apkstore"
+	"github.com/trbutler4/emuctl/pkg/emulator"
 	"github.com/trbutler4/emuctl/pkg/lease"
 )
 
@@ -32,7 +33,9 @@ import (
 //	PUT    /v1/apks/{key}                    body: APK bytes; 409 if key exists
 //	POST   /v1/leases/{id}/reset?wipe=1      reboot the leased device, optionally wiping data
 //	POST   /v1/leases/{id}/shell {"command"} adb shell on the leased device
-//	GET    /v1/leases/{id}/screenshot        PNG of the screen
+//	GET    /v1/leases/{id}/screenshot        PNG of the screen (?source=host: emulator framebuffer, shows secure windows)
+//	POST   /v1/leases/{id}/unlock            get past the lock screen and app credential prompts
+//	POST   /v1/leases/{id}/finger?id=1       touch the virtual fingerprint sensor
 //	GET    /v1/devices/{name}/logs           tail of the emulator log
 //	GET    /metrics                          Prometheus metrics (or on metrics_addr)
 //	POST   /v1/devices/{name}/restart        force restart a device that is free or leased by you
@@ -283,10 +286,47 @@ func (s *Service) Handler() http.Handler {
 			return nil, fail(http.StatusServiceUnavailable, "device not reachable: %v", err)
 		}
 		png, err := d.emu.Screenshot(ctx)
+		if r.URL.Query().Get("source") == "host" {
+			png, err = d.emu.HostScreenshot(ctx)
+		}
 		if err != nil {
 			return nil, fail(http.StatusBadGateway, "screencap: %v", err)
 		}
 		return raw{"image/png", png}, nil
+	}))
+	mux.HandleFunc("POST /v1/leases/{id}/unlock", s.wrap(func(w http.ResponseWriter, r *http.Request, user string) (any, error) {
+		l, err := s.owned(r, user, true)
+		if err != nil {
+			return nil, err
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
+		defer cancel()
+		d := s.devs[l.Device]
+		if err := d.emu.Connect(ctx); err != nil {
+			return nil, fail(http.StatusServiceUnavailable, "device not reachable: %v", err)
+		}
+		res := d.emu.UnlockScreen(ctx)
+		s.Log.Info("unlock", "lease", l.ID, "user", user, "device", l.Device, "found", res.Found,
+			"actions", res.Actions, "cleared", res.Cleared, "err", res.Error)
+		return res, nil
+	}))
+	mux.HandleFunc("POST /v1/leases/{id}/finger", s.wrap(func(w http.ResponseWriter, r *http.Request, user string) (any, error) {
+		l, err := s.owned(r, user, true)
+		if err != nil {
+			return nil, err
+		}
+		id := emulator.FingerID
+		if v := r.URL.Query().Get("id"); v != "" {
+			if id, err = strconv.Atoi(v); err != nil || id < 1 || id > 10 {
+				return nil, fail(http.StatusBadRequest, "id must be a finger id 1-10")
+			}
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+		defer cancel()
+		if err := s.devs[l.Device].emu.FingerTouch(ctx, id); err != nil {
+			return nil, fail(http.StatusBadGateway, "%v", err)
+		}
+		return map[string]any{"touched": id}, nil
 	}))
 	mux.HandleFunc("GET /v1/devices/{name}/logs", s.wrap(func(w http.ResponseWriter, r *http.Request, user string) (any, error) {
 		name := r.PathValue("name")

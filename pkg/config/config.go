@@ -79,6 +79,11 @@ type Device struct {
 	// PIN of the AVD's screen lock, if it has one. emuctl enters it after
 	// boot because apps are hidden until the user's storage is unlocked.
 	UnlockPIN string `json:"unlock_pin,omitempty"`
+	// Enroll a fingerprint (finger 1) after boot, setting unlock_pin as the
+	// screen lock first if the device has none, so apps that lock themselves
+	// with the device credential can be unlocked with a sensor touch
+	// (POST /v1/leases/{id}/unlock). Needs unlock_pin.
+	Fingerprint bool `json:"fingerprint,omitempty"`
 	// Show the emulator window instead of running headless.
 	Window bool `json:"window,omitempty"`
 	// Extra emulator flags, appended verbatim.
@@ -132,6 +137,8 @@ type Config struct {
 }
 
 var nameRE = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
+
+var pinRE = regexp.MustCompile(`^[0-9]{4,16}$`)
 
 var pkgRE = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)+$`)
 
@@ -417,6 +424,12 @@ func (c *Config) Validate() error {
 		}
 		if d.ConsolePort < MinConsolePort || d.ConsolePort > MaxConsolePort || d.ConsolePort%2 != 0 {
 			return fmt.Errorf("device %s: console_port must be even, %d-%d", name, MinConsolePort, MaxConsolePort)
+		}
+		if d.Fingerprint && d.UnlockPIN == "" {
+			return fmt.Errorf("device %s: fingerprint needs unlock_pin (Android only enrolls fingerprints behind a screen lock)", name)
+		}
+		if d.UnlockPIN != "" && !pinRE.MatchString(d.UnlockPIN) {
+			return fmt.Errorf("device %s: unlock_pin must be 4-16 digits", name)
 		}
 		if err := claim(d.ConsolePort, name+" console"); err != nil {
 			return err

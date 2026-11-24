@@ -15,7 +15,9 @@ Client commands read `EMUCTL_URL` (default `http://127.0.0.1:7600`, or
 | `emuctl acquire [-device NAME] [-note TEXT]` | Lease and hold until Ctrl-C. Prints lease JSON. |
 | `emuctl release LEASE` | End a lease, or leave the queue. |
 | `emuctl shell LEASE CMD...` | `adb shell` on the device, run by the server. Exit code is the command's. |
-| `emuctl screenshot LEASE FILE.png` | Save a screenshot. |
+| `emuctl screenshot LEASE FILE.png [-host]` | Save a screenshot. `-host` captures the emulator display, which shows lock prompts that adb returns black. |
+| `emuctl unlock LEASE` | Pass the lock screen and app credential prompts (fingerprint, else PIN). Exits 1 if still locked. |
+| `emuctl finger LEASE [ID]` | Touch the fingerprint sensor (default finger 1). |
 | `emuctl install LEASE APK` | Upload and install an APK. |
 | `emuctl install LEASE -key KEY` | Install a stored APK. |
 | `emuctl reset LEASE [-wipe]` | Reboot (and wipe data), wait until ready. |

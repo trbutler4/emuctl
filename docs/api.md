@@ -45,7 +45,9 @@ Lease fields: `id`, `user`, `want`, `device`, `state` (`queued`, `active`,
 | POST | `/v1/leases/{id}/install?apk=KEY` | `&force=1` to reinstall | `{"installed": false}` if the device already has KEY; 404 if not stored |
 | POST | `/v1/leases/{id}/reset` | `?wipe=1` | lease; device reboots, poll until `ready` |
 | POST | `/v1/leases/{id}/shell` | `{"command"}` | `{"output","exit_code"}` (2 min limit, 1 MiB output) |
-| GET | `/v1/leases/{id}/screenshot` | | `image/png` |
+| GET | `/v1/leases/{id}/screenshot` | `?source=host` | `image/png`. Default is `adb screencap`, which returns secure windows (lock and PIN prompts, FLAG_SECURE apps) as black. `source=host` reads the emulator display from outside Android and shows them. |
+| POST | `/v1/leases/{id}/unlock` | | `{"found","actions","focus","cleared","error"}`: passes the lock screen and app credential prompts (enrolled fingerprint, else `unlock_pin`). Safe when nothing is locked. |
+| POST | `/v1/leases/{id}/finger` | `?id=1` | touch the virtual fingerprint sensor |
 | GET | `/v1/devices/{name}/logs` | `?bytes=N` | `{"log"}` tail of the emulator log |
 | POST | `/v1/devices/{name}/restart` | `?wipe=1` | restart a device not leased by someone else |
 | GET | `/v1/apks` | | stored APKs: `key`, `bytes`, `last_used` |

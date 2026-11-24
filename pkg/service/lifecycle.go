@@ -18,6 +18,8 @@ type deviceOps interface {
 	ClearPackages(ctx context.Context, pkgs []string) error
 	DisableAnimations(ctx context.Context) error
 	Shell(ctx context.Context, command string) ([]byte, int, error)
+	KeepAwake(ctx context.Context) error
+	EnsureFingerprint(ctx context.Context) error
 }
 
 // maxUnverified inconclusive health checks in a row restart a device.
@@ -165,13 +167,26 @@ func (s *Service) healthLoop(ctx context.Context, every time.Duration) {
 
 // prepare runs once after each boot, before the device takes leases.
 func (s *Service) prepare(ctx context.Context, d *device, log *slog.Logger) {
-	if !*s.Cfg.DisableAnimations {
-		return
-	}
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	o := s.ops(d)
+	short, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	if err := s.ops(d).DisableAnimations(ctx); err != nil {
-		log.Warn("disable animations", "err", err)
+	if *s.Cfg.DisableAnimations {
+		if err := o.DisableAnimations(short); err != nil {
+			log.Warn("disable animations", "err", err)
+		}
+	}
+	// A screen that sleeps brings the lock screen back mid-lease.
+	if err := o.KeepAwake(short); err != nil {
+		log.Warn("keep awake", "err", err)
+	}
+	if s.Cfg.Devices[d.emu.Name].Fingerprint {
+		long, cancel := context.WithTimeout(ctx, 3*time.Minute)
+		defer cancel()
+		if err := o.EnsureFingerprint(long); err != nil {
+			log.Warn("fingerprint enrollment", "err", err)
+		} else {
+			log.Info("fingerprint enrolled")
+		}
 	}
 }
 

@@ -32,10 +32,23 @@ func TestValidation(t *testing.T) {
 		`{"devices":{"Bad":{}}}`,
 		`{"users":{"u":"plaintext"},"devices":{}}`,
 		`{"lease_ttl":"soon","devices":{}}`,
+		`{"devices":{"a":{"fingerprint":true}}}`,
+		`{"devices":{"a":{"unlock_pin":"12"}}}`,
+		`{"devices":{"a":{"unlock_pin":"12a4"}}}`,
 	} {
 		if _, err := Parse([]byte(bad)); err == nil {
 			t.Errorf("accepted %s", bad)
 		}
+	}
+}
+
+func TestFingerprintConfig(t *testing.T) {
+	c, err := Parse([]byte(`{"devices":{"a":{"unlock_pin":"1234","fingerprint":true}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d := c.Devices["a"]; !d.Fingerprint || d.UnlockPIN != "1234" {
+		t.Fatalf("%+v", d)
 	}
 }
 

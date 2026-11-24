@@ -9,7 +9,7 @@
       # `go build ./cmd/emuctl` (no cgo, no other dependencies).
       systems = [ "x86_64-linux" "aarch64-linux" "aarch64-darwin" ];
       forAll = f: nixpkgs.lib.genAttrs systems (system: f nixpkgs.legacyPackages.${system});
-      version = "0.3.0";
+      version = "0.4.0";
     in {
       packages = forAll (pkgs: rec {
         emuctl = pkgs.buildGoModule {

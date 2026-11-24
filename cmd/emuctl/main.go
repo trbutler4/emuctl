@@ -17,6 +17,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"syscall"
 	"text/tabwriter"
@@ -67,7 +68,9 @@ Client (EMUCTL_URL: http://host:7600 or ssh://[user@]host, default http://127.0.
   emuctl apk put KEY FILE              store an APK (exists = success)
   emuctl reset LEASE [-wipe]
   emuctl shell LEASE CMD...            adb shell on the device, run by the server
-  emuctl screenshot LEASE FILE.png
+  emuctl screenshot LEASE FILE.png [-host]   -host: emulator framebuffer (shows lock prompts adb blanks)
+  emuctl unlock LEASE                  pass the lock screen / app credential prompt (fingerprint, else PIN)
+  emuctl finger LEASE [ID]             touch the virtual fingerprint sensor (default finger 1)
   emuctl logs DEVICE
   emuctl mcp                           MCP server on stdio for agents
   emuctl version
@@ -164,11 +167,41 @@ func main() {
 		})
 	case "screenshot":
 		err = need(args, 2, func() error {
-			png, err := client.FromEnv().Screenshot(ctx, args[0])
+			c := client.FromEnv()
+			shot := c.Screenshot
+			if len(args) > 2 && (args[2] == "-host" || args[2] == "--host") {
+				shot = c.HostScreenshot
+			}
+			png, err := shot(ctx, args[0])
 			if err != nil {
 				return err
 			}
 			return os.WriteFile(args[1], png, 0o644)
+		})
+	case "unlock":
+		err = need(args, 1, func() error {
+			res, err := client.FromEnv().Unlock(ctx, args[0])
+			if err != nil {
+				return err
+			}
+			b, _ := json.Marshal(res)
+			fmt.Println(string(b))
+			if !res.Cleared {
+				code = 1
+			}
+			return nil
+		})
+	case "finger":
+		err = need(args, 1, func() error {
+			id := 1
+			if len(args) > 1 {
+				n, err := strconv.Atoi(args[1])
+				if err != nil {
+					return fmt.Errorf("finger id: %w", err)
+				}
+				id = n
+			}
+			return client.FromEnv().Finger(ctx, args[0], id)
 		})
 	case "version", "-version", "--version":
 		fmt.Println("emuctl", version)

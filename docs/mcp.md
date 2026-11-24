@@ -22,7 +22,9 @@ exits, so a crashed agent frees its device.
 | `emulator_acquire` | `device?`, `note?`, `lease_id?`, `wait_seconds?` | Blocks up to `wait_seconds` (default 120, max 600). Returns `state: "queued"` if still waiting: call again **with the same `lease_id`** to keep your place. |
 | `emulator_status` | `lease_id` | Current lease state. |
 | `emulator_shell` | `lease_id`, `command` | `adb shell` on the server. Returns output and exit code. |
-| `emulator_screenshot` | `lease_id`, `save_path?` | PNG as image content. |
+| `emulator_screenshot` | `lease_id`, `save_path?`, `source?` | PNG as image content. `source: "host"` shows lock/PIN prompts that the default capture returns black. |
+| `emulator_unlock` | `lease_id` | Gets past the lock screen and app credential prompts (fingerprint, else the device PIN). |
+| `emulator_finger` | `lease_id`, `finger?` | Touch the fingerprint sensor (finger 1 is enrolled by emuctl). |
 | `emulator_install` | `lease_id`, `apk_path` | Installs a file from the MCP machine. |
 | `emulator_reset` | `lease_id`, `wipe?` | Reboots (and wipes), waits until ready. |
 | `emulator_release` | `lease_id` | Always call when done. |

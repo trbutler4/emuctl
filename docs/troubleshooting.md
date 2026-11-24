@@ -17,6 +17,8 @@
 | `run -apk-key` exits 3 | Key not in the store | Build, `emuctl apk put KEY FILE`, retry. See [apks.md](apks.md). |
 | App shows a previous user's data | Server uses `release: none` | Clear it yourself (`emuctl shell LEASE pm clear PKG`), or ask the operator for `release: clear`. |
 | App signed out after every lease | Server uses `release: clear` or `wipe` | Expected. Sign in inside your lease. |
+| Screenshot is black except the status bar | A secure window is showing: usually the app's own unlock prompt (BiometricPrompt / PIN entry) | `emuctl unlock LEASE` (MCP `emulator_unlock`), then screenshot again. `emuctl screenshot LEASE f.png -host` shows what is really on screen. |
+| `unlock` says no unlock_pin is configured | The device has a screen lock emuctl does not know | Set `unlock_pin` (and `fingerprint: true`) for the device. |
 | Taps land on the wrong element | Screen was still changing | Screenshot again before acting; prefer `uiautomator dump` bounds. |
 | `emuctl serve`: `another emuctl serve is using ...` | A server is already running on that `state_dir` | Stop it, or use a different `state_dir`. |
 | `emuctl serve`: `port N already in use` | Something else (not emuctl's AVD) holds the device's port | Find it with `lsof -i :N`. Change `console_port` or stop that process. |

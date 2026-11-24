@@ -240,10 +240,40 @@ func (c *Client) Shell(ctx context.Context, id, cmd string) (ShellResult, error)
 	return out, c.Do(ctx, "POST", "/v1/leases/"+url.PathEscape(id)+"/shell", bytes.NewReader(b), &out)
 }
 
-// Screenshot returns a PNG of the leased device's screen.
+// Screenshot returns a PNG of the leased device's screen. adb screencap
+// blanks secure windows (lock prompts); use HostScreenshot to see them.
 func (c *Client) Screenshot(ctx context.Context, id string) ([]byte, error) {
 	var png []byte
 	return png, c.Do(ctx, "GET", "/v1/leases/"+url.PathEscape(id)+"/screenshot", nil, &png)
+}
+
+// HostScreenshot captures the emulator display from outside Android, so
+// secure windows that Screenshot returns black are visible.
+func (c *Client) HostScreenshot(ctx context.Context, id string) ([]byte, error) {
+	var png []byte
+	return png, c.Do(ctx, "GET", "/v1/leases/"+url.PathEscape(id)+"/screenshot?source=host", nil, &png)
+}
+
+// UnlockResult is what POST /v1/leases/{id}/unlock found and did.
+type UnlockResult struct {
+	Found   []string `json:"found"`
+	Actions []string `json:"actions"`
+	Focus   string   `json:"focus"`
+	Cleared bool     `json:"cleared"`
+	Error   string   `json:"error,omitempty"`
+}
+
+// Unlock gets the leased device past the lock screen and app credential
+// prompts (fingerprint when enrolled, else the configured PIN).
+func (c *Client) Unlock(ctx context.Context, id string) (UnlockResult, error) {
+	var out UnlockResult
+	return out, c.Do(ctx, "POST", "/v1/leases/"+url.PathEscape(id)+"/unlock", nil, &out)
+}
+
+// Finger touches the virtual fingerprint sensor with finger id (1 is the one
+// emuctl enrolls).
+func (c *Client) Finger(ctx context.Context, id string, finger int) error {
+	return c.Do(ctx, "POST", fmt.Sprintf("/v1/leases/%s/finger?id=%d", url.PathEscape(id), finger), nil, nil)
 }
 
 func (c *Client) Logs(ctx context.Context, device string) (string, error) {
